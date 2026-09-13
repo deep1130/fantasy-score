@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.2.9';
+const APP_VERSION = 'v1.3.0';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
@@ -332,7 +332,69 @@ function renderMatchup(expandedSlots = new Set()) {
 }
 const normalizeName = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const normalizeTeam = value => ({ SFO: 'SF', GBP: 'GB', KCC: 'KC', LAC: 'LAC', LAR: 'LAR', JAX: 'JAX', NOS: 'NO', TBB: 'TB', NEP: 'NE', SDO: 'SD' }[String(value || '').toUpperCase()] || String(value || '').toUpperCase());
-function mergeEspnStatGroup(target, group) { const labels = (group.labels || []).map(label => String(label).toUpperCase()); (group.athletes || []).forEach(entry => { const key = `${normalizeName(entry.athlete?.fullName || entry.athlete?.displayName)}|${normalizeTeam(group.team?.abbreviation)}`; const stats = target[key] || {}; (entry.stats || []).forEach((value, index) => { const label = labels[index]; const number = Number(String(value).replace(/[^0-9.-]/g, '')); if (!Number.isFinite(number)) return; if (group.name === 'rushing' && label === 'YDS') stats.rush_yd = number; if (group.name === 'rushing' && label === 'TD') stats.rush_td = number; if (group.name === 'receiving' && label === 'REC') stats.rec = number; if (group.name === 'receiving' && label === 'YDS') stats.rec_yd = number; if (group.name === 'receiving' && label === 'TD') stats.rec_td = number; if (group.name === 'passing' && label === 'YDS') stats.pass_yd = number; if (group.name === 'passing' && label === 'TD') stats.pass_td = number; }); target[key] = stats; }); }
+function mergeEspnStatGroup(target, group) {
+  const labels = (group.labels || []).map(label => String(label).toUpperCase());
+  (group.athletes || []).forEach(entry => {
+    const key = `${normalizeName(entry.athlete?.fullName || entry.athlete?.displayName)}|${normalizeTeam(group.team?.abbreviation)}`;
+    const stats = target[key] || {};
+    (entry.stats || []).forEach((value, index) => {
+      const label = labels[index];
+      const number = Number(String(value).replace(/[^0-9.-]/g, ''));
+      if (group.name === 'rushing') {
+        if (label === 'CAR' && Number.isFinite(number)) stats.rush_att = number;
+        if (label === 'YDS' && Number.isFinite(number)) stats.rush_yd = number;
+        if (label === 'TD' && Number.isFinite(number)) stats.rush_td = number;
+      }
+      if (group.name === 'receiving') {
+        if (label === 'REC' && Number.isFinite(number)) stats.rec = number;
+        if (label === 'YDS' && Number.isFinite(number)) stats.rec_yd = number;
+        if (label === 'TD' && Number.isFinite(number)) stats.rec_td = number;
+        if (label === 'TGTS' && Number.isFinite(number)) stats.rec_tgt = number;
+      }
+      if (group.name === 'passing') {
+        if (label === 'C/ATT') {
+          const parts = String(value).split('/');
+          if (parts.length === 2) {
+            const cmp = Number(parts[0]), att = Number(parts[1]);
+            if (Number.isFinite(cmp)) stats.pass_cmp = cmp;
+            if (Number.isFinite(att)) stats.pass_att = att;
+          }
+        }
+        if (label === 'YDS' && Number.isFinite(number)) stats.pass_yd = number;
+        if (label === 'TD' && Number.isFinite(number)) stats.pass_td = number;
+        if (label === 'INT' && Number.isFinite(number)) stats.pass_int = number;
+      }
+      if (group.name === 'kicking') {
+        if (label === 'FG') {
+          const parts = String(value).split('/');
+          if (parts.length === 2) {
+            const fgm = Number(parts[0]), fga = Number(parts[1]);
+            if (Number.isFinite(fgm)) stats.fgm = fgm;
+            if (Number.isFinite(fga)) stats.fga = fga;
+          }
+        }
+        if (label === 'XP') {
+          const parts = String(value).split('/');
+          if (parts.length >= 1) {
+            const xpm = Number(parts[0]);
+            if (Number.isFinite(xpm)) stats.xpm = xpm;
+          }
+        }
+      }
+      if (group.name === 'defensive') {
+        if (label === 'SACKS' && Number.isFinite(number)) stats.sack = number;
+        if (label === 'TD' && Number.isFinite(number)) stats.def_td = number;
+      }
+      if (group.name === 'interceptions' && label === 'INT' && Number.isFinite(number)) {
+        stats.def_int = (stats.def_int || 0) + number;
+      }
+      if (group.name === 'fumbles' && label === 'REC' && Number.isFinite(number)) {
+        stats.fum_rec = (stats.fum_rec || 0) + number;
+      }
+    });
+    target[key] = stats;
+  });
+}
 async function loadEspnStats() {
   try {
     const controller = new AbortController();
@@ -360,10 +422,36 @@ async function loadEspnStats() {
         .finally(() => clearTimeout(t));
     }));
     const result = {};
-    summaries.filter(Boolean).forEach(summary => (summary.boxscore?.players || []).forEach(team => (team.statistics || []).forEach(group => {
-      group.team = team.team;
-      mergeEspnStatGroup(result, group);
-    })));
+    summaries.filter(Boolean).forEach(summary => {
+      (summary.boxscore?.players || []).forEach(team => (team.statistics || []).forEach(group => {
+        group.team = team.team;
+        mergeEspnStatGroup(result, group);
+      }));
+      const competitors = summary.header?.competitions?.[0]?.competitors || [];
+      (summary.boxscore?.teams || []).forEach(t => {
+        const teamAbbr = normalizeTeam(t.team?.abbreviation);
+        if (!teamAbbr) return;
+        const opp = competitors.find(c => normalizeTeam(c.team?.abbreviation) !== teamAbbr);
+        const ptsAllowed = opp ? Number(opp.score || 0) : undefined;
+        const stats = result[`def|${teamAbbr}`] || {};
+        if (ptsAllowed !== undefined) stats.pts_allowed = ptsAllowed;
+        (t.statistics || []).forEach(s => {
+          if (s.name === 'sacksYardsLost') {
+            const sacks = Number(String(s.displayValue || '').split('-')[0]);
+            if (Number.isFinite(sacks)) stats.sack = sacks;
+          }
+          if (s.name === 'defensiveTouchdowns') {
+            const td = Number(s.displayValue);
+            if (Number.isFinite(td)) stats.def_td = td;
+          }
+          if (s.name === 'interceptions') {
+            const int = Number(s.displayValue);
+            if (Number.isFinite(int)) stats.def_int = int;
+          }
+        });
+        result[`def|${teamAbbr}`] = stats;
+      });
+    });
     state.playerGames = games;
     return result;
   } catch (error) {
@@ -372,7 +460,82 @@ async function loadEspnStats() {
     return {};
   }
 }
-function playerStats(id) { const sleeperStats = state.stats[id]; if (sleeperStats && Object.keys(sleeperStats).length) return sleeperStats; const player = state.players[id] || {}; const name = normalizeName(player.full_name); const team = normalizeTeam(player.team); const exact = state.espnStats[`${name}|${team}`]; if (exact) return exact; const match = Object.entries(state.espnStats).find(([key]) => { const [espnName, espnTeam] = key.split('|'); return espnTeam === team && (espnName.startsWith(name) || name.startsWith(espnName)); }); return match?.[1] || {}; }
+function playerStats(id) {
+  const sleeperStats = state.stats[id];
+  if (sleeperStats && Object.keys(sleeperStats).length) return sleeperStats;
+  const player = state.players[id] || {};
+  const name = normalizeName(player.full_name);
+  const team = normalizeTeam(player.team || id);
+  if (player.position === 'DEF' || !name) {
+    const defStats = state.espnStats[`def|${team}`];
+    if (defStats) return defStats;
+  }
+  const exact = state.espnStats[`${name}|${team}`];
+  if (exact) return exact;
+  const match = Object.entries(state.espnStats).find(([key]) => {
+    const [espnName, espnTeam] = key.split('|');
+    return espnTeam === team && (espnName.startsWith(name) || name.startsWith(espnName));
+  });
+  return match?.[1] || {};
+}
+function describeStatDelta(curr, prev, deltaPoints) {
+  if (!curr || !Object.keys(curr).length) return null;
+  if (!prev || !Object.keys(prev).length) return null;
+  const d = {
+    rush_yd: (curr.rush_yd || 0) - (prev.rush_yd || 0),
+    rush_td: (curr.rush_td || 0) - (prev.rush_td || 0),
+    rec: (curr.rec || 0) - (prev.rec || 0),
+    rec_yd: (curr.rec_yd || 0) - (prev.rec_yd || 0),
+    rec_td: (curr.rec_td || 0) - (prev.rec_td || 0),
+    pass_yd: (curr.pass_yd || 0) - (prev.pass_yd || 0),
+    pass_td: (curr.pass_td || 0) - (prev.pass_td || 0),
+    pass_int: (curr.pass_int || 0) - (prev.pass_int || 0),
+    fgm: (curr.fgm || 0) - (prev.fgm || 0),
+    xpm: (curr.xpm || 0) - (prev.xpm || 0),
+    sack: (curr.sack || 0) - (prev.sack || 0),
+    def_int: (curr.def_int || 0) - (prev.def_int || 0),
+    def_td: (curr.def_td || 0) - (prev.def_td || 0),
+    fum_rec: (curr.fum_rec || 0) - (prev.fum_rec || 0)
+  };
+
+  const phrases = [];
+  if (d.rush_td > 0) {
+    phrases.push(d.rush_yd > 0 ? `${d.rush_yd}-yd rush TD` : `${d.rush_td} rush TD`);
+  } else if (d.rush_yd > 0) {
+    phrases.push(`+${d.rush_yd} rush yds`);
+  } else if (d.rush_yd < 0) {
+    phrases.push(`${d.rush_yd} rush yds`);
+  }
+
+  if (d.rec_td > 0) {
+    const catchPart = d.rec > 0 ? `${d.rec} rec, ` : '';
+    phrases.push(d.rec_yd > 0 ? `${catchPart}${d.rec_yd}-yd rec TD` : `${catchPart}${d.rec_td} rec TD`);
+  } else {
+    if (d.rec > 0 && d.rec_yd !== 0) {
+      phrases.push(`${d.rec} rec for ${d.rec_yd > 0 ? '+' : ''}${d.rec_yd} yds`);
+    } else if (d.rec > 0) {
+      phrases.push(`+${d.rec} rec`);
+    } else if (d.rec_yd !== 0) {
+      phrases.push(`${d.rec_yd > 0 ? '+' : ''}${d.rec_yd} rec yds`);
+    }
+  }
+
+  if (d.pass_td > 0) {
+    phrases.push(d.pass_yd > 0 ? `${d.pass_yd}-yd pass TD` : `${d.pass_td} pass TD`);
+  } else if (d.pass_yd > 0) {
+    phrases.push(`+${d.pass_yd} pass yds`);
+  }
+
+  if (d.pass_int > 0) phrases.push(`${d.pass_int} INT`);
+  if (d.fgm > 0) phrases.push(`+${d.fgm} FG`);
+  if (d.xpm > 0) phrases.push(`+${d.xpm} XP`);
+  if (d.sack > 0) phrases.push(`+${d.sack} sack`);
+  if (d.def_int > 0) phrases.push(`+${d.def_int} INT`);
+  if (d.fum_rec > 0) phrases.push(`+${d.fum_rec} FR`);
+  if (d.def_td > 0) phrases.push(`+${d.def_td} def TD`);
+
+  return phrases.length ? phrases.join(', ') : null;
+}
 function playerGame(id) { const player = state.players[id] || {}; const game = state.playerGames[normalizeTeam(player.team)]; return game ? `${game.status} · ${game.context}` : 'Game info pending'; }
 function matchupTeamLabel(team) { const row = state.allMatchups.find(item => item.mine); if (!row) return team.name; if (String(row.rosterA) === String(team.rosterId)) return row.a; if (String(row.rosterB) === String(team.rosterId)) return row.b; return team.name; }
 function projectionPoints(id) { const projection = state.projections[id] || {}; const value = projection.pts_ppr ?? projection.pts_half_ppr ?? projection.pts_std ?? projection.fantasy_points ?? projection.projected_points; return Number.isFinite(Number(value)) ? Number(value) : null; }
@@ -393,7 +556,13 @@ function statSummary(stats, points = null) {
   if (points !== null && Number(points) > 0) return `+${fmt(points)} pts`;
   return Number(points) === 0 && points !== null ? 'No stats recorded' : 'Live stats pending';
 }
-function renderTicker() { return state.ticker.length ? state.ticker.map(item => `<div class="ticker-item"><i></i><div><strong>${esc(item.player)}</strong> gained ${fmt(item.delta)} points${item.playerTotal !== undefined ? ` (${fmt(item.playerTotal)} pts total)` : ''}<small>${esc(item.stats)} · ${esc(item.team)} · Score ${fmt(item.you)} - ${fmt(item.opponent)}</small></div><time>${time(item.at)}</time></div>`).join('') : '<div class="empty">Score swings will appear here as players add points.</div>'; }
+function renderTicker() {
+  return state.ticker.length ? state.ticker.map(item => {
+    const playHtml = item.play ? `<span class="ticker-play">${esc(item.play)}</span> · ` : '';
+    const statsHtml = item.stats && item.stats !== 'No stats recorded' && !item.stats.startsWith('+') ? `${esc(item.stats)} · ` : '';
+    return `<div class="ticker-item"><i></i><div><strong>${esc(item.player)}</strong> gained ${fmt(item.delta)} points${item.playerTotal !== undefined ? ` (${fmt(item.playerTotal)} pts total)` : ''}<small>${playHtml}${statsHtml}${esc(item.team)} · Score ${fmt(item.you)} - ${fmt(item.opponent)}</small></div><time>${time(item.at)}</time></div>`;
+  }).join('') : '<div class="empty">Score swings will appear here as players add points.</div>';
+}
 function bindSettings() { $('poll-interval').value = settings.pollSeconds; $('poll-value').textContent = pollLabel(settings.pollSeconds); $('track-opponent').checked = settings.trackOpponent; $('voice-enabled').checked = settings.voice; $('voice-volume').value = settings.volume; $('volume-value').textContent = Math.round(settings.volume * 100) + '%'; $('window-enabled').checked = settings.gameWindow; $('wake-enabled').checked = settings.wake; $('poll-interval').oninput = event => { settings.pollSeconds = Number(event.target.value); saveSettings(); bindSettings(); schedulePoll(); }; $('voice-volume').oninput = event => { settings.volume = Number(event.target.value); saveSettings(); bindSettings(); }; [['track-opponent','trackOpponent'], ['voice-enabled','voice'], ['window-enabled','gameWindow'], ['wake-enabled','wake']].forEach(([id, key]) => $(id).onchange = event => { settings[key] = event.target.checked; saveSettings(); if (key === 'wake') setWakeLock(settings.wake); }); $('reset-user').onclick = () => { localStorage.removeItem('fantasy-score-user'); state.user = null; state.leagues = []; document.body.classList.remove('settings-open'); setupView(); }; }
 
 async function loadLeagueUsers() {
@@ -441,6 +610,7 @@ async function poll(force = false) {
   const you = makeTeam({ ...roster, players_points: mine?.players_points, starters: mine?.starters }, true);
   const opponent = makeTeam(rival, false);
   const changes = [];
+  const previousStats = readStorage('fantasy-score-stats-history', {});
   [you, opponent].forEach(team => {
     if (!team.mine && !settings.trackOpponent) return;
     const startersSet = new Set((team.starters || []).filter(id => id && id !== '0'));
@@ -455,9 +625,12 @@ async function poll(force = false) {
       if (Object.prototype.hasOwnProperty.call(previous, key) && delta > 0) {
         team.deltas[id] = delta;
         const pStats = playerStats(id);
+        const prevPStats = previousStats[key];
+        const play = describeStatDelta(pStats, prevPStats, delta);
         const summary = statSummary(pStats, delta);
         changes.push({
           player: state.players[id]?.full_name || id,
+          play,
           stats: summary,
           team: team.name,
           delta,
@@ -468,9 +641,14 @@ async function poll(force = false) {
         });
       }
       previous[key] = points;
+      const currentStats = playerStats(id);
+      if (currentStats && Object.keys(currentStats).length) {
+        previousStats[key] = { ...currentStats };
+      }
     });
   });
   localStorage.setItem('fantasy-score-points', JSON.stringify(previous));
+  localStorage.setItem('fantasy-score-stats-history', JSON.stringify(previousStats));
   state.matchup = mine ? { you, opponent } : null;
   state.allMatchups = groupMatchups(matchups, rosters, mine);
   console.info(`[Fantasy Score] Matchup summary: You ${fmt(you.total)} - Opponent ${fmt(opponent.total)}`);
@@ -507,7 +685,7 @@ function announce(changes) {
   const audible = changes.filter(item => item.delta >= Number(settings.voiceMinPoints || 0));
   if (!audible.length) return;
   const item = audible[0];
-  const statText = item.stats && !/no stats/i.test(item.stats) && !item.stats.startsWith('+') ? `, ${item.stats},` : '';
+  const statText = item.play ? `, ${item.play},` : (item.stats && !/no stats/i.test(item.stats) && !item.stats.startsWith('+') ? `, ${item.stats},` : '');
   const teamContext = item.team ? ` for ${item.team}` : '';
   const totalText = item.playerTotal !== undefined ? `, now at ${fmt(item.playerTotal)} points` : '';
   speakText(`${item.player}${statText} gained ${fmt(item.delta)} points${teamContext}${totalText}. Current score: You ${fmt(item.you)}, Opponent ${fmt(item.opponent)}.`);
@@ -598,6 +776,7 @@ async function pollAllLeagues(force = false) {
       if (weekChanged) {
         state.leagueData = {};
         localStorage.removeItem('fantasy-score-points');
+        localStorage.removeItem('fantasy-score-stats-history');
       }
     }
     state.stats = stats || state.stats || {};
