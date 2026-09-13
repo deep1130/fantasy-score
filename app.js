@@ -96,11 +96,14 @@ function compactStatSummary(stats, points = null, isDef = false) {
   else if (Number(stats.rec)) parts.push(`${stats.rec} rec`);
   if (Number(stats.fgm)) parts.push(`${stats.fgm} FG`);
   if (Number(stats.sack)) parts.push(`${stats.sack} sk`);
-  if (Number(stats.pass_int)) parts.push(`${stats.pass_int} INT`);
-  if (Number(stats.fum_lost)) parts.push(`${stats.fum_lost} FL`);
   if (isDef && Number(stats.def_int)) parts.push(`${stats.def_int} INT`);
   if (isDef && Number(stats.fum_rec)) parts.push(`${stats.fum_rec} FR`);
-  if (parts.length) return parts.slice(0, 2).join(' · ');
+  const turnovers = [];
+  if (!isDef && Number(stats.pass_int)) turnovers.push(`${stats.pass_int} INT`);
+  if (!isDef && Number(stats.fum_lost)) turnovers.push(`${stats.fum_lost} FL`);
+  const mainStats = parts.slice(0, 2);
+  const combined = [...mainStats, ...turnovers];
+  if (combined.length) return combined.slice(0, 3).join(' · ');
   return Number(points) === 0 ? 'No stats' : '';
 }
 
@@ -110,6 +113,7 @@ function fullStatBreakdown(id, points = null) {
   if (!stats || !Object.keys(stats).length) {
     return `<div class="detail-empty">${Number(points) === 0 ? 'No stats recorded yet' : 'Live stats pending'}</div>`;
   }
+  const isDef = ((state.players && state.players[id]) || {}).position === 'DEF';
   const lines = [];
   if (stats.pass_att || stats.pass_yd || stats.pass_td || stats.pass_int) {
     const cmp = stats.pass_cmp !== undefined ? `${stats.pass_cmp}/` : '';
@@ -119,12 +123,11 @@ function fullStatBreakdown(id, points = null) {
     const int = stats.pass_int ? `, ${stats.pass_int} INT` : '';
     lines.push(`<strong>Pass:</strong> ${att}${yds}${td}${int}`);
   }
-  if (stats.rush_att || stats.rush_yd || stats.rush_td || stats.fum_lost) {
+  if (stats.rush_att || stats.rush_yd || stats.rush_td) {
     const att = stats.rush_att ? `${stats.rush_att} car, ` : '';
     const yds = stats.rush_yd ? `${stats.rush_yd} yds` : stats.rush_att ? '0 yds' : '';
     const td = stats.rush_td ? `, ${stats.rush_td} TD` : '';
-    const fum = stats.fum_lost ? `, ${stats.fum_lost} fum lost` : '';
-    lines.push(`<strong>Rush:</strong> ${att}${yds}${td}${fum}`.replace(/^<strong>Rush:<\/strong> , /, '<strong>Rush:</strong> '));
+    lines.push(`<strong>Rush:</strong> ${att}${yds}${td}`);
   }
   if (stats.rec || stats.rec_yd || stats.rec_td || stats.rec_tgt) {
     const rec = stats.rec ? `${stats.rec} rec` : '';
@@ -133,12 +136,16 @@ function fullStatBreakdown(id, points = null) {
     const td = stats.rec_td ? `, ${stats.rec_td} TD` : '';
     lines.push(`<strong>Rec:</strong> ${rec}${tgt}${yds}${td}`.replace(/^<strong>Rec:<\/strong> , /, '<strong>Rec:</strong> '));
   }
+  if (!isDef && (stats.fum_lost || stats.fum)) {
+    const fl = stats.fum_lost ? `${stats.fum_lost} fum lost` : '';
+    const fTotal = stats.fum && stats.fum > (stats.fum_lost || 0) ? ` (${stats.fum} fumbles)` : '';
+    lines.push(`<strong>Turnovers:</strong> ${fl}${fTotal}`);
+  }
   if (stats.fgm !== undefined || stats.fga !== undefined || stats.xpm !== undefined) {
     const fg = stats.fgm !== undefined ? `${stats.fgm}/${stats.fga || stats.fgm} FG` : '';
     const xp = stats.xpm !== undefined ? `, ${stats.xpm} XP` : '';
     lines.push(`<strong>Kick:</strong> ${fg}${xp}`);
   }
-  const isDef = ((state.players && state.players[id]) || {}).position === 'DEF';
   if (isDef && (stats.sack || stats.def_int || stats.fum_rec || stats.def_td || stats.def_safety || stats.pts_allowed !== undefined)) {
     const s = [];
     if (stats.sack) s.push(`${stats.sack} sk`);
