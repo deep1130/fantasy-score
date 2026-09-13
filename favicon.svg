@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <clipPath id="football-shape">
+      <path d="M 15 50 Q 50 20 85 50 Q 50 80 15 50 Z" />
+    </clipPath>
+  </defs>
+  <g transform="rotate(-45 50 50)">
+    <!-- Football body -->
+    <path d="M 15 50 Q 50 20 85 50 Q 50 80 15 50 Z" fill="#854d24" />
+    
+    <!-- Highlights and Shadows -->
+    <path d="M 15 50 Q 50 20 85 50 Z" fill="#ffffff" opacity="0.1" clip-path="url(#football-shape)" />
+    <path d="M 15 50 Q 50 80 85 50 Z" fill="#000000" opacity="0.15" clip-path="url(#football-shape)" />
+    
+    <!-- White Stripes -->
+    <rect x="26" y="10" width="5" height="80" fill="#eef5ff" clip-path="url(#football-shape)" />
+    <rect x="69" y="10" width="5" height="80" fill="#eef5ff" clip-path="url(#football-shape)" />
+    
+    <!-- Laces -->
+    <line x1="35" y1="50" x2="65" y2="50" stroke="#eef5ff" stroke-width="4" stroke-linecap="round" />
+    <line x1="40" y1="44" x2="40" y2="56" stroke="#eef5ff" stroke-width="3" stroke-linecap="round" />
+    <line x1="45" y1="44" x2="45" y2="56" stroke="#eef5ff" stroke-width="3" stroke-linecap="round" />
+    <line x1="50" y1="44" x2="50" y2="56" stroke="#eef5ff" stroke-width="3" stroke-linecap="round" />
+    <line x1="55" y1="44" x2="55" y2="56" stroke="#eef5ff" stroke-width="3" stroke-linecap="round" />
+    <line x1="60" y1="44" x2="60" y2="56" stroke="#eef5ff" stroke-width="3" stroke-linecap="round" />
+  </g>
+</svg>
