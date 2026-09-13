@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.2.8';
+const APP_VERSION = 'v1.2.9';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
@@ -18,7 +18,9 @@ const api = async (path, timeoutMs = 15000) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(API + path, { signal: controller.signal });
+    const sep = path.includes('?') ? '&' : '?';
+    const url = `${API}${path}${sep}_t=${Date.now()}`;
+    const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
     if (!response.ok) throw new Error('Sleeper API returned ' + response.status);
     return await response.json();
   } finally {
@@ -335,7 +337,7 @@ async function loadEspnStats() {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
-    const board = await fetch(ESPN, { signal: controller.signal }).then(response => response.json()).finally(() => clearTimeout(timeout));
+    const board = await fetch(`${ESPN}?_t=${Date.now()}`, { cache: 'no-store', signal: controller.signal }).then(response => response.json()).finally(() => clearTimeout(timeout));
     const games = {};
     (board.events || []).forEach(event => {
       const competition = event.competitions?.[0];
@@ -352,7 +354,7 @@ async function loadEspnStats() {
     const summaries = await Promise.all(events.map(event => {
       const c = new AbortController();
       const t = setTimeout(() => c.abort(), 5000);
-      return fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${event.id}`, { signal: c.signal })
+      return fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${event.id}&_t=${Date.now()}`, { cache: 'no-store', signal: c.signal })
         .then(response => response.ok ? response.json() : null)
         .catch(() => null)
         .finally(() => clearTimeout(t));
