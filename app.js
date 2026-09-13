@@ -8,8 +8,6 @@ const fmt = value => Number(value || 0).toFixed(2).replace(/\.00$/, '');
 function dedupeTicker(items) {
   const seen = new Set();
   return (items || []).filter(item => {
-    const numDelta = Number(item.delta || 0);
-    if (numDelta < -2.6) return false;
     if (item.play === 'Turnover / point loss') return false;
     const key = `${item.leagueId || ''}|${item.rosterId || ''}|${item.player}|${item.team}|${fmt(item.delta)}|${fmt(item.playerTotal)}`;
     if (seen.has(key)) return false;
@@ -498,22 +496,40 @@ async function loadEspnStats() {
   }
 }
 function playerStats(id) {
-  const sleeperStats = state.stats[id];
-  if (sleeperStats && Object.keys(sleeperStats).length) return sleeperStats;
+  const sleeperStats = state.stats[id] || {};
   const player = (state.players && state.players[id]) || {};
   const name = normalizeName(player.full_name);
   const team = normalizeTeam(player.team || id);
+  let espn = {};
   if (player.position === 'DEF' || !name) {
-    const defStats = state.espnStats[`def|${team}`];
-    if (defStats) return defStats;
+    espn = state.espnStats[`def|${team}`] || {};
+  } else {
+    espn = state.espnStats[`${name}|${team}`];
+    if (!espn) {
+      const match = Object.entries(state.espnStats).find(([key]) => {
+        const [espnName, espnTeam] = key.split('|');
+        return espnTeam === team && (espnName.startsWith(name) || name.startsWith(espnName));
+      });
+      espn = match?.[1] || {};
+    }
   }
-  const exact = state.espnStats[`${name}|${team}`];
-  if (exact) return exact;
-  const match = Object.entries(state.espnStats).find(([key]) => {
-    const [espnName, espnTeam] = key.split('|');
-    return espnTeam === team && (espnName.startsWith(name) || name.startsWith(espnName));
-  });
-  return match?.[1] || {};
+  if (!Object.keys(sleeperStats).length) return espn;
+  if (!Object.keys(espn).length) return sleeperStats;
+  return {
+    ...espn,
+    ...sleeperStats,
+    rush_yd: Math.max(Number(sleeperStats.rush_yd || 0), Number(espn.rush_yd || 0)),
+    rush_att: Math.max(Number(sleeperStats.rush_att || 0), Number(espn.rush_att || 0)),
+    rush_td: Math.max(Number(sleeperStats.rush_td || 0), Number(espn.rush_td || 0)),
+    rec: Math.max(Number(sleeperStats.rec || 0), Number(espn.rec || 0)),
+    rec_yd: Math.max(Number(sleeperStats.rec_yd || 0), Number(espn.rec_yd || 0)),
+    rec_td: Math.max(Number(sleeperStats.rec_td || 0), Number(espn.rec_td || 0)),
+    pass_yd: Math.max(Number(sleeperStats.pass_yd || 0), Number(espn.pass_yd || 0)),
+    pass_td: Math.max(Number(sleeperStats.pass_td || 0), Number(espn.pass_td || 0)),
+    pass_int: Math.max(Number(sleeperStats.pass_int || 0), Number(espn.pass_int || 0)),
+    fum_lost: Math.max(Number(sleeperStats.fum_lost || 0), Number(espn.fum_lost || 0)),
+    sack: Math.max(Number(sleeperStats.sack || 0), Number(espn.sack || 0))
+  };
 }
 function describeStatDelta(curr, prev, deltaPoints, isDef = false) {
   if (!curr || !Object.keys(curr).length) return null;
@@ -538,8 +554,8 @@ function describeStatDelta(curr, prev, deltaPoints, isDef = false) {
   };
 
   const phrases = [];
-  if (d.pass_int > 0) phrases.push(d.pass_int === 1 ? 'INT thrown (-2 pts)' : `${d.pass_int} INTs thrown`);
-  if (d.fum_lost > 0) phrases.push(d.fum_lost === 1 ? 'fumble lost (-2 pts)' : `${d.fum_lost} fumbles lost`);
+  if (d.pass_int > 0) phrases.push(d.pass_int === 1 ? 'INT thrown' : `${d.pass_int} INTs thrown`);
+  if (d.fum_lost > 0) phrases.push(d.fum_lost === 1 ? 'fumble lost' : `${d.fum_lost} fumbles lost`);
   if (isDef && d.def_int > 0) phrases.push(d.def_int === 1 ? '+1 INT takeaway' : `+${d.def_int} INT takeaways`);
   if (isDef && d.fum_rec > 0) phrases.push(d.fum_rec === 1 ? '+1 fumble rec' : `+${d.fum_rec} fumble rec`);
   if (isDef && d.def_safety > 0) phrases.push(d.def_safety === 1 ? '+1 safety' : `+${d.def_safety} safeties`);
@@ -584,29 +600,22 @@ function isLegitimatePointDrop(curr, prev, delta, isDef = false) {
   if (isDef) {
     if (!prev || !Object.keys(prev).length) return true;
     if ((curr?.pts_allowed || 0) > (prev.pts_allowed || 0)) return true;
-    return delta <= -0.5 && delta >= -10;
+    return delta < 0;
   }
-  // Offensive players:
-  // Cannot lose more than 2.8 points on any single play in standard/PPR fantasy
-  if (delta < -2.8) {
+  // For offensive players, verify if an actual turnover or stat reduction occurred:
+  if (curr && prev && Object.keys(prev).length > 0) {
+    if ((curr.pass_int || 0) > (prev.pass_int || 0)) return true;
+    if ((curr.fum_lost || 0) > (prev.fum_lost || 0)) return true;
+    if ((curr.fum || 0) > (prev.fum || 0)) return true;
+    if ((curr.rush_yd || 0) < (prev.rush_yd || 0)) return true;
+    if ((curr.rec_yd || 0) < (prev.rec_yd || 0)) return true;
+    if ((curr.pass_yd || 0) < (prev.pass_yd || 0)) return true;
+    if ((curr.rush_td || 0) < (prev.rush_td || 0)) return true;
+    if ((curr.rec_td || 0) < (prev.rec_td || 0)) return true;
+    if ((curr.pass_td || 0) < (prev.pass_td || 0)) return true;
+    if ((curr.rec || 0) < (prev.rec || 0)) return true;
     return false;
   }
-  // Turnovers: typically -2.0 points (or -1.5 to -2.5)
-  const isTurnoverDelta = delta <= -1.5 && delta >= -2.5;
-  const newInt = curr && prev && Object.keys(prev).length > 0 && ((curr.pass_int || 0) > (prev.pass_int || 0));
-  const newFum = curr && prev && Object.keys(prev).length > 0 && ((curr.fum_lost || 0) > (prev.fum_lost || 0));
-  if (isTurnoverDelta && (newInt || newFum)) {
-    return true;
-  }
-  // Minor yardage loss on a play (tackle for loss / sack / loss of yards): -0.05 to -0.6
-  if (delta >= -0.6 && delta <= -0.05) {
-    if (curr && prev && Object.keys(prev).length > 0) {
-      if ((curr.rush_yd || 0) < (prev.rush_yd || 0) || (curr.rec_yd || 0) < (prev.rec_yd || 0) || (curr.pass_yd || 0) < (prev.pass_yd || 0)) {
-        return true;
-      }
-    }
-  }
-  // Reject all other drops (stale cache flapping, missing stats feed)
   return false;
 }
 function playerGame(id) { const player = (state.players && state.players[id]) || {}; const game = state.playerGames[normalizeTeam(player.team)]; return game ? `${game.status} · ${game.context}` : 'Game info pending'; }
@@ -782,9 +791,9 @@ async function poll(force = false) {
             ? (isDef
                 ? 'Points allowed'
                 : ((pStats?.fum_lost || 0) > (prevPStats?.fum_lost || 0)
-                    ? 'Fumble lost (-2 pts)'
+                    ? 'Fumble lost'
                     : ((pStats?.pass_int || 0) > (prevPStats?.pass_int || 0)
-                        ? 'Interception thrown (-2 pts)'
+                        ? 'Interception thrown'
                         : 'Stat adjustment')))
             : null);
         const summary = statSummary(pStats, delta, isDef);
