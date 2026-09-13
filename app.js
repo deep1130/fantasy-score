@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.3.2';
+const APP_VERSION = 'v1.3.3';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
@@ -559,6 +559,15 @@ function statSummary(stats, points = null) {
   if (points !== null && Number(points) > 0) return `+${fmt(points)} pts`;
   return Number(points) === 0 && points !== null ? 'No stats recorded' : 'Live stats pending';
 }
+function dedupeTicker(items) {
+  const seen = new Set();
+  return (items || []).filter(item => {
+    const key = `${item.player}|${item.team}|${fmt(item.delta)}|${fmt(item.playerTotal)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 function renderTicker() {
   return state.ticker.length ? state.ticker.map(item => {
     const playHtml = item.play ? `<span class="ticker-play">${esc(item.play)}</span> · ` : '';
@@ -644,7 +653,8 @@ async function poll(force = false) {
   const roster = rosters.find(item => item.owner_id === state.user.user_id);
   const mine = (matchups || []).find(item => item.roster_id === roster?.roster_id);
   const rival = (matchups || []).find(item => item.matchup_id === mine?.matchup_id && item.roster_id !== roster?.roster_id);
-  const previous = readStorage('fantasy-score-points', {});
+  state.previousPoints = state.previousPoints || readStorage('fantasy-score-points', {});
+  const previous = state.previousPoints;
   const makeTeam = (item, isMine) => {
     const points = item?.players_points || {};
     const starters = item?.starters || [];
@@ -656,7 +666,8 @@ async function poll(force = false) {
   const you = makeTeam({ ...roster, players_points: mine?.players_points, starters: mine?.starters }, true);
   const opponent = makeTeam(rival, false);
   const changes = [];
-  const previousStats = readStorage('fantasy-score-stats-history', {});
+  state.previousStats = state.previousStats || readStorage('fantasy-score-stats-history', {});
+  const previousStats = state.previousStats;
   [you, opponent].forEach(team => {
     if (!team.mine && !settings.trackOpponent) return;
     const startersSet = new Set((team.starters || []).filter(id => id && id !== '0'));
@@ -699,8 +710,19 @@ async function poll(force = false) {
   state.allMatchups = groupMatchups(matchups, rosters, mine);
   console.info(`[Fantasy Score] Matchup summary: You ${fmt(you.total)} - Opponent ${fmt(opponent.total)}`);
   if (changes.length) {
-    state.ticker = [...changes.reverse(), ...state.ticker].slice(0, 30);
-    announce(changes);
+    const isDuplicate = (a, b) => (
+      a.player === b.player &&
+      a.team === b.team &&
+      fmt(a.playerTotal) === fmt(b.playerTotal) &&
+      fmt(a.delta) === fmt(b.delta)
+    );
+    const uniqueChanges = changes.filter(c => !state.ticker.some(existing => isDuplicate(c, existing)));
+    if (uniqueChanges.length) {
+      state.ticker = dedupeTicker([...uniqueChanges.reverse(), ...state.ticker]).slice(0, 30);
+      announce(uniqueChanges);
+    }
+  } else {
+    state.ticker = dedupeTicker(state.ticker);
   }
 }
 
@@ -807,6 +829,10 @@ async function pollAllLeagues(force = false) {
     schedulePoll();
     return;
   }
+  if (state.isPolling) {
+    return;
+  }
+  state.isPolling = true;
   const original = state.selectedLeague;
   state.loading = true;
   state.error = '';
@@ -821,6 +847,8 @@ async function pollAllLeagues(force = false) {
       state.nfl = latestNfl;
       if (weekChanged) {
         state.leagueData = {};
+        state.previousPoints = {};
+        state.previousStats = {};
         localStorage.removeItem('fantasy-score-points');
         localStorage.removeItem('fantasy-score-stats-history');
       }
@@ -858,6 +886,7 @@ async function pollAllLeagues(force = false) {
     console.warn('[Fantasy Score] Polling error:', error);
     state.error = error.message;
   } finally {
+    state.isPolling = false;
     state.loading = false;
     dashboardView();
     schedulePoll();
@@ -896,7 +925,7 @@ function saveDashboardCache() {
       selectedLeague: state.selectedLeague,
       leagueData: cleanLeagueData,
       rosterPlayers,
-      ticker: state.ticker,
+      ticker: dedupeTicker(state.ticker),
       lastUpdated: state.lastUpdated
     };
     localStorage.setItem('fantasy-score-dashboard-cache', JSON.stringify(payload));
@@ -969,7 +998,7 @@ if (savedUser) {
     state.selectedLeague = cachedDashboard.selectedLeague || state.leagues[0];
     state.leagueData = cachedDashboard.leagueData || {};
     state.players = cachedDashboard.rosterPlayers || {};
-    state.ticker = cachedDashboard.ticker || [];
+    state.ticker = dedupeTicker(cachedDashboard.ticker || []);
     state.lastUpdated = cachedDashboard.lastUpdated;
     state.loading = true;
     dashboardView();
