@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.3.1';
+const APP_VERSION = 'v1.3.2';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
@@ -57,6 +57,9 @@ const inGameWindow = () => {
 function setupView() {
   $('app').innerHTML = `<main class="setup"><div class="brand"><div class="brand-mark">FS</div><div><div class="eyebrow">Sleeper live desk</div><h1>Fantasy Score</h1></div></div><h2>Your matchup, in motion.</h2><p>Connect a Sleeper username to follow active leagues, live player points, NFL games, and score swings from one focused view.</p><form class="setup-form" id="username-form"><input id="username" type="text" autocomplete="username" placeholder="Sleeper username" required><button class="btn primary">Connect</button></form>${state.error ? `<div class="error">${esc(state.error)}</div>` : ''}</main>`;
   $('username-form').addEventListener('submit', event => { event.preventDefault(); connect($('username').value.trim()); });
+}
+function loadingView(username) {
+  $('app').innerHTML = `<main class="setup"><div class="brand"><div class="brand-mark">FS</div><div><div class="eyebrow">Sleeper live desk</div><h1>Fantasy Score</h1></div></div><h2>Loading live desk...</h2><p>Connecting to Sleeper for <strong>${esc(username)}</strong>...</p></main>`;
 }
 function renderAllMatchups() { if (!state.allMatchups.length) return '<div class="empty">No league matchups available for this week.</div>'; return `<div class="league-list">${state.allMatchups.map(item => `<div class="matchup-row ${item.mine ? 'active' : ''}"><div class="row-top"><span>${item.mine ? 'YOUR MATCHUP' : 'MATCHUP ' + item.id}</span><span>${item.count} rosters</span></div><div class="row-score"><span>${esc(item.a)}</span><span>${fmt(item.scoreA)} · ${fmt(item.scoreB)}</span><span>${esc(item.b)}</span></div></div>`).join('')}</div>`; }
 function formatPlayerName(player) {
@@ -599,8 +602,10 @@ function bindSettings() {
   });
   $('reset-user').onclick = () => {
     localStorage.removeItem('fantasy-score-user');
+    localStorage.removeItem('fantasy-score-dashboard-cache');
     state.user = null;
     state.leagues = [];
+    state.leagueData = {};
     document.body.classList.remove('settings-open');
     setupView();
   };
@@ -848,6 +853,7 @@ async function pollAllLeagues(force = false) {
     state.selectedLeague = original || leagues[0] || null;
     state.lastUpdated = Date.now();
     state.error = '';
+    saveDashboardCache();
   } catch (error) {
     console.warn('[Fantasy Score] Polling error:', error);
     state.error = error.message;
@@ -857,10 +863,50 @@ async function pollAllLeagues(force = false) {
     schedulePoll();
   }
 }
+function saveDashboardCache() {
+  try {
+    const rosterPlayers = {};
+    Object.values(state.leagueData || {}).forEach(ld => {
+      const starters = [
+        ...(ld.matchup?.you?.starters || []),
+        ...(ld.matchup?.opponent?.starters || [])
+      ];
+      starters.forEach(id => {
+        if (id && state.players[id]) rosterPlayers[id] = state.players[id];
+      });
+    });
+
+    const cleanLeagueData = {};
+    Object.entries(state.leagueData || {}).forEach(([lid, data]) => {
+      cleanLeagueData[lid] = {
+        matchup: data.matchup,
+        allMatchups: data.allMatchups,
+        stats: data.stats,
+        projections: data.projections,
+        espnStats: data.espnStats,
+        playerGames: data.playerGames,
+        leagueUsers: data.leagueUsers
+      };
+    });
+
+    const payload = {
+      user: state.user,
+      nfl: state.nfl,
+      leagues: state.leagues,
+      selectedLeague: state.selectedLeague,
+      leagueData: cleanLeagueData,
+      rosterPlayers,
+      ticker: state.ticker,
+      lastUpdated: state.lastUpdated
+    };
+    localStorage.setItem('fantasy-score-dashboard-cache', JSON.stringify(payload));
+  } catch (e) {
+    console.warn('Could not cache dashboard data', e);
+  }
+}
 async function connect(username) {
   state.loading = true;
   state.error = '';
-  setupView();
   try {
     state.user = await api('/user/' + encodeURIComponent(username));
     if (!state.user?.user_id) throw new Error('Sleeper username not found.');
@@ -914,5 +960,23 @@ window.addEventListener('focus', () => {
   }
 });
 const savedUser = localStorage.getItem('fantasy-score-user');
-if (savedUser) connect(savedUser);
-else setupView();
+const cachedDashboard = readStorage('fantasy-score-dashboard-cache', null);
+if (savedUser) {
+  if (cachedDashboard && cachedDashboard.user?.username?.toLowerCase() === savedUser.toLowerCase()) {
+    state.user = cachedDashboard.user;
+    state.nfl = cachedDashboard.nfl;
+    state.leagues = cachedDashboard.leagues || [];
+    state.selectedLeague = cachedDashboard.selectedLeague || state.leagues[0];
+    state.leagueData = cachedDashboard.leagueData || {};
+    state.players = cachedDashboard.rosterPlayers || {};
+    state.ticker = cachedDashboard.ticker || [];
+    state.lastUpdated = cachedDashboard.lastUpdated;
+    state.loading = true;
+    dashboardView();
+  } else {
+    loadingView(savedUser);
+  }
+  connect(savedUser);
+} else {
+  setupView();
+}
