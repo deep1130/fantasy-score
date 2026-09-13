@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.3.10';
+const APP_VERSION = 'v1.3.11';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
@@ -441,10 +441,25 @@ async function loadEspnStats() {
         games[normalizeTeam(away.team.abbreviation)] = { context: `@ ${normalizeTeam(home.team.abbreviation)}`, status };
       }
     });
-    const events = (board.events || []).filter(event => event.status?.type?.state !== 'pre');
-    const summaries = await Promise.all(events.map(event => {
+    const rosterTeams = new Set();
+    Object.values(state.leagueData || {}).forEach(ld => {
+      [...(ld.matchup?.you?.starters || []), ...(ld.matchup?.opponent?.starters || [])].forEach(id => {
+        const team = state.players?.[id]?.team;
+        if (team) rosterTeams.add(normalizeTeam(team));
+      });
+    });
+
+    const activeEvents = (board.events || []).filter(event => {
+      const st = event.status?.type?.state;
+      if (st !== 'in') return false;
+      if (!rosterTeams.size) return true;
+      const comps = event.competitions?.[0]?.competitors || [];
+      return comps.some(c => rosterTeams.has(normalizeTeam(c.team?.abbreviation)));
+    });
+
+    const summaries = await Promise.all(activeEvents.map(event => {
       const c = new AbortController();
-      const t = setTimeout(() => c.abort(), 5000);
+      const t = setTimeout(() => c.abort(), 4000);
       return fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${event.id}&_t=${Date.now()}`, { cache: 'no-store', signal: c.signal })
         .then(response => response.ok ? response.json() : null)
         .catch(() => null)
@@ -702,10 +717,10 @@ function bindSettings() {
   };
 }
 
-async function loadLeagueUsers() {
-  if (!state.selectedLeague) return;
+async function loadLeagueUsers(targetLeague = state.selectedLeague) {
+  if (!targetLeague) return [];
   state.leagueUsersCache = state.leagueUsersCache || {};
-  const id = state.selectedLeague.league_id;
+  const id = targetLeague.league_id;
   if (!state.leagueUsersCache[id]) {
     try {
       state.leagueUsersCache[id] = await api(`/league/${id}/users`);
@@ -714,10 +729,11 @@ async function loadLeagueUsers() {
     }
   }
   state.leagueUsers = state.leagueUsersCache[id];
+  return state.leagueUsersCache[id];
 }
-function getRosterDisplayName(rosterId, rosters, isMine = false) {
+function getRosterDisplayName(rosterId, rosters, isMine = false, leagueUsers = state.leagueUsers) {
   const roster = (rosters || []).find(r => r.roster_id === rosterId);
-  const user = (state.leagueUsers || []).find(u => u.user_id === roster?.owner_id);
+  const user = (leagueUsers || state.leagueUsers || []).find(u => u.user_id === roster?.owner_id);
   const teamName = roster?.metadata?.team_name || roster?.metadata?.name || roster?.team_name || user?.metadata?.team_name;
   const ownerName = user?.display_name || user?.username;
   if (teamName && ownerName && teamName !== ownerName) return `${teamName} (${ownerName})`;
@@ -726,13 +742,25 @@ function getRosterDisplayName(rosterId, rosters, isMine = false) {
   return isMine ? 'Your team' : `Team ${rosterId || '-'}`;
 }
 
-async function poll(force = false) {
-  if (!state.selectedLeague) return;
+async function poll(targetLeague = state.selectedLeague, force = false) {
+  if (!targetLeague) return null;
+  const leagueId = targetLeague.league_id;
+  state.rostersCache = state.rostersCache || {};
+  const cachedRosters = state.rostersCache[leagueId];
+  const rostersExpired = force || !cachedRosters || (Date.now() - (cachedRosters.at || 0) > 180000);
+  const rostersPromise = (!rostersExpired && cachedRosters.data)
+    ? Promise.resolve(cachedRosters.data)
+    : api(`/league/${leagueId}/rosters`).then(r => {
+        state.rostersCache[leagueId] = { data: r, at: Date.now() };
+        return r;
+      }).catch(() => cachedRosters?.data || []);
+
   const [matchups, rosters] = await Promise.all([
-    api(`/league/${state.selectedLeague.league_id}/matchups/${state.nfl.week}`),
-    api(`/league/${state.selectedLeague.league_id}/rosters`)
+    api(`/league/${leagueId}/matchups/${state.nfl.week}`),
+    rostersPromise
   ]);
-  const roster = rosters.find(item => item.owner_id === state.user.user_id);
+  const leagueUsers = state.leagueUsersCache[leagueId] || [];
+  const roster = (rosters || []).find(item => item.owner_id === state.user.user_id);
   const mine = (matchups || []).find(item => item.roster_id === roster?.roster_id);
   const rival = (matchups || []).find(item => item.matchup_id === mine?.matchup_id && item.roster_id !== roster?.roster_id);
   state.previousPoints = state.previousPoints || readStorage('fantasy-score-points', {});
@@ -745,7 +773,7 @@ async function poll(force = false) {
     const points = { ...rawPoints };
     starters.forEach(id => {
       if (!id || id === '0') return;
-      const key = `${state.selectedLeague.league_id}:${item?.roster_id || ''}:${id}`;
+      const key = `${leagueId}:${item?.roster_id || ''}:${id}`;
       const old = Number(previous[key]);
       const current = Number(points[id] || 0);
       const isDef = ((state.players && state.players[id]) || {}).position === 'DEF';
@@ -760,7 +788,7 @@ async function poll(force = false) {
     });
     const deltas = {};
     const total = starters.reduce((sum, id) => sum + Number(points[id] || 0), 0);
-    const name = getRosterDisplayName(item?.roster_id, rosters, isMine);
+    const name = getRosterDisplayName(item?.roster_id, rosters, isMine, leagueUsers);
     return { name, rosterId: item?.roster_id || '', starters, points, deltas, total, mine: isMine };
   };
   const you = makeTeam({ ...roster, players_points: mine?.players_points, starters: mine?.starters }, true);
@@ -770,7 +798,7 @@ async function poll(force = false) {
     if (!team.mine && !settings.trackOpponent) return;
     const startersSet = new Set((team.starters || []).filter(id => id && id !== '0'));
     Object.entries(team.points).forEach(([id, points]) => {
-      const key = `${state.selectedLeague.league_id}:${team.rosterId}:${id}`;
+      const key = `${leagueId}:${team.rosterId}:${id}`;
       const old = Number(previous[key] || 0);
       const delta = Number(points || 0) - old;
       if (!startersSet.has(id)) {
@@ -783,7 +811,6 @@ async function poll(force = false) {
 
       if (Object.prototype.hasOwnProperty.call(previous, key) && Math.abs(delta) > 0.001) {
         if (delta < 0 && !isLegitimatePointDrop(pStats, prevPStats, delta, isDef)) {
-          // Stale CDN edge cache: ignore false score drop and do not downgrade previous[key]
           team.points[id] = old;
           return;
         }
@@ -823,8 +850,8 @@ async function poll(force = false) {
         const summary = statSummary(pStats, delta, isDef);
         changes.push({
           player: (state.players && state.players[id]?.full_name) || id,
-          leagueId: state.selectedLeague?.league_id || '',
-          leagueName: state.selectedLeague?.name || '',
+          leagueId: targetLeague.league_id || '',
+          leagueName: targetLeague.name || '',
           rosterId: team.rosterId,
           play,
           stats: summary,
@@ -843,31 +870,14 @@ async function poll(force = false) {
       }
     });
   });
-  localStorage.setItem('fantasy-score-points', JSON.stringify(previous));
-  localStorage.setItem('fantasy-score-stats-history', JSON.stringify(previousStats));
-  state.matchup = mine ? { you, opponent } : null;
-  state.allMatchups = groupMatchups(matchups, rosters, mine);
-  console.info(`[Fantasy Score] Matchup summary: You ${fmt(you.total)} - Opponent ${fmt(opponent.total)}`);
-  if (changes.length) {
-    const isDuplicate = (a, b) => (
-      a.player === b.player &&
-      fmt(a.playerTotal) === fmt(b.playerTotal) &&
-      fmt(a.delta) === fmt(b.delta) &&
-      Math.abs((a.at || 0) - (b.at || 0)) < 120000
-    );
-    const uniqueChanges = changes.filter(c => !state.ticker.some(existing => isDuplicate(c, existing)));
-    if (uniqueChanges.length) {
-      state.ticker = dedupeTicker([...uniqueChanges.reverse(), ...state.ticker]).slice(0, 50);
-      localStorage.setItem('fantasy-score-ticker', JSON.stringify(state.ticker));
-      announce(uniqueChanges);
-    }
-  } else {
-    state.ticker = dedupeTicker(state.ticker);
-    localStorage.setItem('fantasy-score-ticker', JSON.stringify(state.ticker));
-  }
+  return {
+    matchup: mine ? { you, opponent } : null,
+    allMatchups: groupMatchups(matchups, rosters, mine, leagueUsers),
+    changes
+  };
 }
 
-function groupMatchups(matchups, rosters, mine) {
+function groupMatchups(matchups, rosters, mine, leagueUsers = state.leagueUsers) {
   const groups = {};
   (matchups || []).filter(item => item.matchup_id).forEach(item => (groups[item.matchup_id] ||= []).push(item));
   return Object.entries(groups).map(([id, items]) => {
@@ -900,7 +910,12 @@ function announce(changes) {
   const actionText = item.delta < 0 ? `lost ${fmt(Math.abs(item.delta))} points` : `gained ${fmt(item.delta)} points`;
   speakText(`${item.player}${statText} ${actionText}${teamContext}${totalText}. Current score: You ${fmt(item.you)}, Opponent ${fmt(item.opponent)}.`);
 }
-function schedulePoll() { clearTimeout(pollTimer); pollTimer = setTimeout(() => pollAllLeagues(), settings.pollSeconds * 1000); }
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+  const interval = isHidden ? 60000 : (settings.pollSeconds * 1000);
+  pollTimer = setTimeout(() => pollAllLeagues(), interval);
+}
 async function setWakeLock(enabled) { if (!navigator.wakeLock) return; try { if (enabled && !state.wakeLock) state.wakeLock = await navigator.wakeLock.request('screen'); if (!enabled && state.wakeLock) { await state.wakeLock.release(); state.wakeLock = null; } } catch (error) { console.warn('Wake lock unavailable', error); } }
 const includedLeagues = () => state.leagues.filter(league => !settings.excludedLeagues.includes(league.league_id));
 function renderLeagueExclusions() { const target = $('league-exclusions'); if (!target) return; target.innerHTML = `<div class="section-kicker">Page leagues</div><div class="exclude-list">${state.leagues.length ? state.leagues.map(league => `<label class="setting-card switch"><span><strong>${esc(league.name)}</strong><small>${settings.excludedLeagues.includes(league.league_id) ? 'Excluded from the overview' : 'Included on the overview'}</small></span><input type="checkbox" data-league-toggle="${league.league_id}" ${!settings.excludedLeagues.includes(league.league_id) ? 'checked' : ''}><span class="switch-ui"></span></label>`).join('') : '<div class="empty">No leagues loaded yet.</div>'}</div>`; }
@@ -932,6 +947,7 @@ function renderLeagueCard(league, openLeagues = new Set(), expandedSlots = new S
   return `<details class="league-card" data-league-id="${league.league_id}" ${isOpen ? 'open' : ''}><summary><div class="league-summary"><div class="league-summary-copy"><strong>${esc(league.name)}</strong><small>${esc(teamSummary)}</small></div><div class="league-summary-score"><strong>${score}</strong><small>Week ${esc(state.nfl?.week || '-')}</small></div></div></summary><div class="panel-content">${detail}<details><summary><span><span class="eyebrow">League pulse</span><br><strong>All matchups</strong></span></summary><div class="panel-content">${pulse}</div></details></div></details>`;
 }
 function dashboardView() {
+  const scrollY = typeof window !== 'undefined' ? window.scrollY : 0;
   const visible = includedLeagues();
   const openLeagues = new Set([...document.querySelectorAll('details.league-card[open]')].map(d => d.dataset.leagueId).filter(Boolean));
   const expandedSlots = new Set([...document.querySelectorAll('[data-slot-row].is-expanded')].map(r => r.dataset.slotKey).filter(Boolean));
@@ -942,6 +958,9 @@ function dashboardView() {
   bindDashboard();
   bindSettings();
   bindLeagueExclusions();
+  if (scrollY > 0 && typeof window !== 'undefined') {
+    window.scrollTo({ top: scrollY, behavior: 'instant' });
+  }
 }
 function bindDashboard() {
   $('refresh')?.addEventListener('click', () => pollAllLeagues(true));
@@ -977,51 +996,108 @@ async function pollAllLeagues(force = false) {
   }
   state.isPolling = true;
   const original = state.selectedLeague;
-  state.loading = true;
+  if (force || !state.lastUpdated) {
+    state.loading = true;
+  }
   state.error = '';
   try {
-    if (!state.nfl) state.nfl = await api('/state/nfl');
-    const [latestNfl, stats] = await Promise.all([
-      api('/state/nfl').catch(() => state.nfl),
-      api(`/stats/nfl/${state.nfl.season}/${state.nfl.week}`).catch(() => state.stats || {})
-    ]);
-    if (latestNfl) {
-      const weekChanged = latestNfl.season !== state.nfl?.season || latestNfl.week !== state.nfl?.week;
-      state.nfl = latestNfl;
-      if (weekChanged) {
-        state.leagueData = {};
-        state.previousPoints = {};
-        state.previousStats = {};
-        localStorage.removeItem('fantasy-score-points');
-        localStorage.removeItem('fantasy-score-stats-history');
+    const now = Date.now();
+    if (!state.nfl || (now - (state.lastNflFetch || 0) > 600000)) {
+      try {
+        const latestNfl = await api('/state/nfl');
+        if (latestNfl) {
+          const weekChanged = latestNfl.season !== state.nfl?.season || latestNfl.week !== state.nfl?.week;
+          state.nfl = latestNfl;
+          state.lastNflFetch = now;
+          if (weekChanged) {
+            state.leagueData = {};
+            state.previousPoints = {};
+            state.previousStats = {};
+            localStorage.removeItem('fantasy-score-points');
+            localStorage.removeItem('fantasy-score-stats-history');
+          }
+        }
+      } catch (err) {
+        if (!state.nfl) throw err;
       }
     }
-    state.stats = stats || state.stats || {};
+
     await ensurePlayersLoaded();
-    const [espnStats, projections] = await Promise.all([
+
+    const projPromise = (!state.projections || (now - (state.lastProjFetch || 0) > 900000))
+      ? api(`/projections/nfl/${state.nfl.season}/${state.nfl.week}`).then(p => {
+          state.projections = p || {};
+          state.lastProjFetch = now;
+          return state.projections;
+        }).catch(() => state.projections || {})
+      : Promise.resolve(state.projections);
+
+    const [stats, espnStats] = await Promise.all([
+      api(`/stats/nfl/${state.nfl.season}/${state.nfl.week}`).catch(() => state.stats || {}),
       loadEspnStats(),
-      api(`/projections/nfl/${state.nfl.season}/${state.nfl.week}`).catch(() => ({}))
+      projPromise
     ]);
+    state.stats = stats || state.stats || {};
     state.espnStats = espnStats || {};
-    state.projections = projections || {};
 
     const leagues = includedLeagues();
-    for (const league of leagues) {
-      state.selectedLeague = league;
-      await loadLeagueUsers();
-      await poll(true);
+    const pollResults = await Promise.all(leagues.map(async (league) => {
+      await loadLeagueUsers(league);
+      const res = await poll(league, force);
+      return { league, res };
+    }));
+
+    const allChanges = [];
+    pollResults.forEach(({ league, res }) => {
+      if (!res) return;
       state.leagueData[league.league_id] = {
-        matchup: state.matchup,
-        allMatchups: state.allMatchups,
+        matchup: res.matchup,
+        allMatchups: res.allMatchups,
         players: state.players,
         stats: state.stats,
         projections: state.projections,
         espnStats: state.espnStats,
         playerGames: state.playerGames,
-        leagueUsers: state.leagueUsers
+        leagueUsers: state.leagueUsersCache?.[league.league_id] || []
       };
-    }
+      if (res.changes && res.changes.length) {
+        allChanges.push(...res.changes);
+      }
+    });
+
     state.selectedLeague = original || leagues[0] || null;
+    if (state.selectedLeague && state.leagueData[state.selectedLeague.league_id]) {
+      state.matchup = state.leagueData[state.selectedLeague.league_id].matchup;
+      state.allMatchups = state.leagueData[state.selectedLeague.league_id].allMatchups;
+    }
+
+    if (allChanges.length) {
+      const isDuplicate = (a, b) => (
+        a.player === b.player &&
+        fmt(a.playerTotal) === fmt(b.playerTotal) &&
+        fmt(a.delta) === fmt(b.delta) &&
+        Math.abs((a.at || 0) - (b.at || 0)) < 120000
+      );
+      const uniqueInBatch = [];
+      allChanges.forEach(c => {
+        if (!uniqueInBatch.some(existing => isDuplicate(c, existing))) {
+          uniqueInBatch.push(c);
+        }
+      });
+      const uniqueChanges = uniqueInBatch.filter(c => !state.ticker.some(existing => isDuplicate(c, existing)));
+      if (uniqueChanges.length) {
+        state.ticker = dedupeTicker([...uniqueChanges.reverse(), ...state.ticker]).slice(0, 50);
+        localStorage.setItem('fantasy-score-ticker', JSON.stringify(state.ticker));
+        announce(uniqueChanges);
+      }
+    } else {
+      state.ticker = dedupeTicker(state.ticker);
+      localStorage.setItem('fantasy-score-ticker', JSON.stringify(state.ticker));
+    }
+
+    if (state.previousPoints) localStorage.setItem('fantasy-score-points', JSON.stringify(state.previousPoints));
+    if (state.previousStats) localStorage.setItem('fantasy-score-stats-history', JSON.stringify(state.previousStats));
+
     state.lastUpdated = Date.now();
     state.error = '';
     saveDashboardCache();
@@ -1124,7 +1200,11 @@ document.addEventListener('visibilitychange', () => {
     const elapsed = Date.now() - (state.lastUpdated || 0);
     if (elapsed >= (settings.pollSeconds || 60) * 1000) {
       pollAllLeagues(true);
+    } else {
+      schedulePoll();
     }
+  } else {
+    schedulePoll();
   }
 });
 window.addEventListener('focus', () => {
