@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+  <title>Fantasy Score / Live Desk</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#app">Skip to main content</a>
+  <div id="app" role="main"></div>
+  <div class="drawer-backdrop" id="backdrop"></div>
+  <aside class="drawer" aria-label="Dashboard settings" role="dialog" aria-modal="true">
+    <div class="drawer-head"><div><div class="eyebrow">Control room</div><h2>Dashboard settings</h2><p class="drawer-subtitle">Tune how Fantasy Score watches your leagues.</p></div><button class="btn icon" id="close-settings" aria-label="Close settings">x</button></div>
+    <div class="settings-section"><div class="section-kicker">Refresh</div><div class="setting-card"><label for="poll-interval">Polling interval <span class="range-value" id="poll-value"></span></label><p>Minimum 120 seconds to respect API limits.</p><input id="poll-interval" type="range" min="120" max="900" step="30"></div><label class="setting-card switch"><span><strong>Game window filter</strong><small>Poll Sundays from 1:00 PM until 11:30 PM local time.</small></span><input id="window-enabled" type="checkbox"><span class="switch-ui"></span></label></div>
+    <div class="settings-section"><div class="section-kicker">Matchup feed</div><label class="setting-card switch"><span><strong>Track opponent starters</strong><small>Include opponent scoring in the ticker and voice feed.</small></span><input id="track-opponent" type="checkbox"><span class="switch-ui"></span></label></div>
+    <div class="settings-section"><div class="section-kicker">Audio</div><label class="setting-card switch"><span><strong>Voice announcements</strong><small>Kokoro only. If the model cannot load, the app stays silent.</small></span><input id="voice-enabled" type="checkbox"><span class="switch-ui"></span></label><div class="setting-card"><label for="kokoro-voice">Kokoro voice</label><select id="kokoro-voice"><option value="bf_emma">British female - Emma</option><option value="bf_isabella">British female - Isabella</option><option value="bm_george">British male - George</option><option value="bm_lewis">British male - Lewis</option><option value="af_heart">American female - Heart</option><option value="af_bella">American female - Bella</option><option value="am_adam">American male - Adam</option><option value="am_michael">American male - Michael</option></select><small>Kokoro downloads its model once, then runs locally in the browser.</small><button class="btn voice-test" id="voice-test" type="button">Test selected voice</button></div><div class="setting-card"><label for="voice-volume">Voice volume <span class="range-value" id="volume-value"></span></label><input id="voice-volume" type="range" min="0" max="1" step=".05"></div><div class="setting-card"><label for="voice-rate">Speaking rate <span class="range-value" id="voice-rate-value"></span></label><input id="voice-rate" type="range" min="0.5" max="2" step=".1"></div><div class="setting-card"><label for="voice-min-points">Minimum points to announce <span class="range-value" id="voice-min-value"></span></label><p>Ignore smaller point changes in speech, but keep them in the ticker.</p><input id="voice-min-points" type="range" min="0.1" max="10" step=".1"></div></div>
+    <div class="settings-section"><div class="section-kicker">Device</div><label class="setting-card switch"><span><strong>Keep screen awake</strong><small>Request a Screen Wake Lock while the dashboard is open.</small></span><input id="wake-enabled" type="checkbox"><span class="switch-ui"></span></label></div>
+    <div class="settings-section" id="league-exclusions"></div>
+    <div class="drawer-footer"><button class="btn" id="reset-user">Change Sleeper username</button><span>Preferences save automatically</span></div>
+  </aside>
+  <footer class="site-notice">Personal, non-commercial use only. Fantasy Score is an independent project and is not affiliated with or endorsed by Sleeper, ESPN, the NFL, or any team.</footer>
+  <script src="app.js"></script>
+</body>
+</html>
