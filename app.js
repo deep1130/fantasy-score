@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.2.2';
+const APP_VERSION = 'v1.2.3';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 120, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: true, wake: false, excludedLeagues: [] };
@@ -30,17 +30,84 @@ function formatPlayerName(player) {
   return { full, short };
 }
 
+function compactStatSummary(stats, points = null) {
+  if (!stats || !Object.keys(stats).length) {
+    return Number(points) === 0 ? 'No stats' : '';
+  }
+  const parts = [];
+  const totalTd = (Number(stats.pass_td) || 0) + (Number(stats.rush_td) || 0) + (Number(stats.rec_td) || 0) + (Number(stats.def_td) || 0) + (Number(stats.ret_td) || 0);
+  if (totalTd > 0) parts.push(`${totalTd} TD`);
+  if (Number(stats.pass_yd)) parts.push(`${stats.pass_yd} pYd`);
+  if (Number(stats.rush_yd)) parts.push(`${stats.rush_yd} rYd`);
+  if (Number(stats.rec_yd)) parts.push(`${stats.rec_yd} recYd`);
+  else if (Number(stats.rec)) parts.push(`${stats.rec} rec`);
+  if (Number(stats.fgm)) parts.push(`${stats.fgm} FG`);
+  if (Number(stats.sack)) parts.push(`${stats.sack} sk`);
+  if (Number(stats.pass_int) || Number(stats.def_int)) parts.push(`${stats.pass_int || stats.def_int} INT`);
+  if (parts.length) return parts.slice(0, 2).join(' · ');
+  return Number(points) === 0 ? 'No stats' : '';
+}
+
+function fullStatBreakdown(id, points = null) {
+  if (!id || id === '0') return '<div class="detail-empty">No player in slot</div>';
+  const stats = playerStats(id);
+  if (!stats || !Object.keys(stats).length) {
+    return `<div class="detail-empty">${Number(points) === 0 ? 'No stats recorded yet' : 'Live stats pending'}</div>`;
+  }
+  const lines = [];
+  if (stats.pass_att || stats.pass_yd || stats.pass_td || stats.pass_int) {
+    const cmp = stats.pass_cmp !== undefined ? `${stats.pass_cmp}/` : '';
+    const att = stats.pass_att ? `${cmp}${stats.pass_att} att, ` : '';
+    const yds = `${stats.pass_yd || 0} yds`;
+    const td = stats.pass_td ? `, ${stats.pass_td} TD` : '';
+    const int = stats.pass_int ? `, ${stats.pass_int} INT` : '';
+    lines.push(`<strong>Pass:</strong> ${att}${yds}${td}${int}`);
+  }
+  if (stats.rush_att || stats.rush_yd || stats.rush_td) {
+    const att = stats.rush_att ? `${stats.rush_att} car, ` : '';
+    const yds = `${stats.rush_yd || 0} yds`;
+    const td = stats.rush_td ? `, ${stats.rush_td} TD` : '';
+    lines.push(`<strong>Rush:</strong> ${att}${yds}${td}`);
+  }
+  if (stats.rec || stats.rec_yd || stats.rec_td || stats.rec_tgt) {
+    const rec = stats.rec ? `${stats.rec} rec` : '';
+    const tgt = stats.rec_tgt ? ` (${stats.rec_tgt} tgts)` : '';
+    const yds = stats.rec_yd ? `, ${stats.rec_yd} yds` : '';
+    const td = stats.rec_td ? `, ${stats.rec_td} TD` : '';
+    lines.push(`<strong>Rec:</strong> ${rec}${tgt}${yds}${td}`.replace(/^<strong>Rec:<\/strong> , /, '<strong>Rec:</strong> '));
+  }
+  if (stats.fgm !== undefined || stats.fga !== undefined || stats.xpm !== undefined) {
+    const fg = stats.fgm !== undefined ? `${stats.fgm}/${stats.fga || stats.fgm} FG` : '';
+    const xp = stats.xpm !== undefined ? `, ${stats.xpm} XP` : '';
+    lines.push(`<strong>Kick:</strong> ${fg}${xp}`);
+  }
+  if (stats.sack || stats.def_int || stats.fum_rec || stats.def_td || stats.pts_allowed !== undefined) {
+    const s = [];
+    if (stats.sack) s.push(`${stats.sack} sk`);
+    if (stats.def_int) s.push(`${stats.def_int} INT`);
+    if (stats.fum_rec) s.push(`${stats.fum_rec} FR`);
+    if (stats.def_td) s.push(`${stats.def_td} TD`);
+    if (stats.pts_allowed !== undefined) s.push(`${stats.pts_allowed} PA`);
+    lines.push(`<strong>Def:</strong> ${s.join(', ')}`);
+  }
+  if (!lines.length) {
+    const fallback = statSummary(stats, points);
+    return `<div class="detail-stat">${fallback}</div>`;
+  }
+  return lines.map(l => `<div class="detail-stat">${l}</div>`).join('');
+}
+
 function playerSubText(id, points) {
   if (!id || id === '0') return 'No player set';
   const player = state.players[id] || {};
   const game = state.playerGames[normalizeTeam(player.team)];
   const status = game?.status || '';
-  const stats = statSummary(playerStats(id), points);
+  const stats = compactStatSummary(playerStats(id), points);
   if (/final|post/i.test(status)) {
-    return stats !== 'No stats recorded' ? `Final · ${stats}` : `Final`;
+    return stats ? `Final · ${stats}` : `Final`;
   }
   if (/in|qtr|half|live|\d+:\d+/i.test(status)) {
-    return stats !== 'No stats recorded' ? `${status} · ${stats}` : status;
+    return stats ? `${status} · ${stats}` : status;
   }
   const proj = projectionPoints(id);
   if (proj !== null && Number(points || 0) === 0) {
@@ -92,49 +159,88 @@ function renderMatchup() {
     const myPoints = isMyEmpty ? 0 : Number(team.points[myId] || 0);
     const oppPoints = isOppEmpty ? 0 : Number(opponent.points[oppId] || 0);
 
+    const myProj = isMyEmpty ? null : projectionPoints(myId);
+    const oppProj = isOppEmpty ? null : projectionPoints(oppId);
+
     const myDelta = isMyEmpty ? 0 : (team.deltas[myId] || 0);
     const oppDelta = isOppEmpty ? 0 : (opponent.deltas[oppId] || 0);
 
     const mySub = isMyEmpty ? 'Empty slot' : playerSubText(myId, myPoints);
     const oppSub = isOppEmpty ? 'Empty slot' : playerSubText(oppId, oppPoints);
 
+    const hoverTitle = `${myName.full} (${isMyEmpty ? '-' : fmt(myPoints)} pts) vs ${oppName.full} (${isOppEmpty ? '-' : fmt(oppPoints)} pts) - Tap to expand details`;
+
     slots.push(`
-      <div class="slot-row">
-        <div class="slot-col is-mine ${isMyEmpty ? 'is-empty' : ''}">
-          <div class="player-block">
-            <div class="player-top">
-              <span class="player-name">
-                <span class="name-full">${esc(myName.full)}</span>
-                <span class="name-short">${esc(myName.short)}</span>
-              </span>
-              ${myPlayer?.team ? `<span class="team-tag">${esc(myPlayer.team)}</span>` : ''}
+      <div class="slot-row" data-slot-row tabindex="0" role="button" aria-expanded="false" title="${esc(hoverTitle)}">
+        <div class="slot-summary">
+          <div class="slot-col is-mine ${isMyEmpty ? 'is-empty' : ''}">
+            <div class="player-block">
+              <div class="player-top">
+                <span class="player-name">
+                  <span class="name-full">${esc(myName.full)}</span>
+                  <span class="name-short">${esc(myName.short)}</span>
+                </span>
+                ${myPlayer?.team ? `<span class="team-tag">${esc(myPlayer.team)}</span>` : ''}
+              </div>
+              <div class="player-sub">${esc(mySub)}</div>
             </div>
-            <div class="player-sub">${esc(mySub)}</div>
+            <div class="player-score-block">
+              <span class="score-pts">${isMyEmpty ? '-' : fmt(myPoints)}</span>
+              ${myDelta > 0 ? `<span class="score-delta">+${fmt(myDelta)}</span>` : ''}
+            </div>
           </div>
-          <div class="player-score-block">
-            <span class="score-pts">${isMyEmpty ? '-' : fmt(myPoints)}</span>
-            ${myDelta > 0 ? `<span class="score-delta">+${fmt(myDelta)}</span>` : ''}
+
+          <div class="slot-pos">
+            <span class="pos-badge ${posClass}">${esc(pos)}</span>
+          </div>
+
+          <div class="slot-col is-opponent ${isOppEmpty ? 'is-empty' : ''}">
+            <div class="player-score-block">
+              <span class="score-pts">${isOppEmpty ? '-' : fmt(oppPoints)}</span>
+              ${oppDelta > 0 ? `<span class="score-delta">+${fmt(oppDelta)}</span>` : ''}
+            </div>
+            <div class="player-block">
+              <div class="player-top">
+                ${oppPlayer?.team ? `<span class="team-tag">${esc(oppPlayer.team)}</span>` : ''}
+                <span class="player-name">
+                  <span class="name-full">${esc(oppName.full)}</span>
+                  <span class="name-short">${esc(oppName.short)}</span>
+                </span>
+              </div>
+              <div class="player-sub">${esc(oppSub)}</div>
+            </div>
           </div>
         </div>
 
-        <div class="slot-pos">
-          <span class="pos-badge ${posClass}">${esc(pos)}</span>
-        </div>
-
-        <div class="slot-col is-opponent ${isOppEmpty ? 'is-empty' : ''}">
-          <div class="player-score-block">
-            <span class="score-pts">${isOppEmpty ? '-' : fmt(oppPoints)}</span>
-            ${oppDelta > 0 ? `<span class="score-delta">+${fmt(oppDelta)}</span>` : ''}
-          </div>
-          <div class="player-block">
-            <div class="player-top">
-              ${oppPlayer?.team ? `<span class="team-tag">${esc(oppPlayer.team)}</span>` : ''}
-              <span class="player-name">
-                <span class="name-full">${esc(oppName.full)}</span>
-                <span class="name-short">${esc(oppName.short)}</span>
-              </span>
+        <div class="slot-detail-drawer" aria-hidden="true">
+          <div class="detail-col is-mine">
+            <div class="detail-header">
+              <strong>${esc(myName.full)}</strong>
+              <span class="detail-meta">${esc(myPlayer?.team || 'FA')} · ${esc(myPlayer?.position || pos)}</span>
             </div>
-            <div class="player-sub">${esc(oppSub)}</div>
+            <div class="detail-game">${esc(myId ? playerGame(myId) : 'No game')}</div>
+            <div class="detail-stats">${fullStatBreakdown(myId, myPoints)}</div>
+            <div class="detail-footer">
+              <span>Actual: <strong>${isMyEmpty ? '0.00' : fmt(myPoints)}</strong></span>
+              ${myProj !== null ? `<span>Proj: <strong>${fmt(myProj)}</strong></span>` : ''}
+              ${myDelta > 0 ? `<span class="delta">+${fmt(myDelta)}</span>` : ''}
+            </div>
+          </div>
+
+          <div class="detail-sep"></div>
+
+          <div class="detail-col is-opponent">
+            <div class="detail-header">
+              <strong>${esc(oppName.full)}</strong>
+              <span class="detail-meta">${esc(oppPlayer?.team || 'FA')} · ${esc(oppPlayer?.position || pos)}</span>
+            </div>
+            <div class="detail-game">${esc(oppId ? playerGame(oppId) : 'No game')}</div>
+            <div class="detail-stats">${fullStatBreakdown(oppId, oppPoints)}</div>
+            <div class="detail-footer">
+              <span>Actual: <strong>${isOppEmpty ? '0.00' : fmt(oppPoints)}</strong></span>
+              ${oppProj !== null ? `<span>Proj: <strong>${fmt(oppProj)}</strong></span>` : ''}
+              ${oppDelta > 0 ? `<span class="delta">+${fmt(oppDelta)}</span>` : ''}
+            </div>
           </div>
         </div>
       </div>
@@ -169,6 +275,7 @@ function renderMatchup() {
       </div>
 
       <div class="matchup-slots">
+        <div class="matchup-slots-hint">Tap any matchup to view stat splits</div>
         <div class="slots-header">
           <div class="header-team is-mine">
             <span class="header-team-name">${esc(teamName)}</span>
@@ -215,7 +322,29 @@ function bindVoiceSettings() { bindVoiceThreshold(); const kokoroVoice = $('koko
 async function announceTestVoice() { const btn = $('voice-test'); const original = btn?.textContent || 'Test selected voice'; if (btn) { btn.disabled = true; btn.textContent = 'Loading Kokoro...'; } try { const tts = await getKokoroTts(); if (btn) btn.textContent = 'Generating speech...'; const raw = await tts.generate('Voice test.', { voice: settings.kokoroVoice, speed: settings.voiceRate }); if (btn) btn.textContent = 'Playing...'; await playRawAudio(raw); } catch (error) { console.warn('Kokoro voice test failed:', error); if (btn) btn.textContent = 'Voice error'; await new Promise(r => setTimeout(r, 2000)); } finally { if (btn) { btn.disabled = false; btn.textContent = original; } } }
 function renderLeagueCard(league) { const snapshot = state.leagueData[league.league_id]; if (!snapshot) return `<details class="league-card"><summary><div class="league-summary"><div class="league-summary-copy"><strong>${esc(league.name)}</strong><small>Waiting for first sync...</small></div></div></summary><div class="panel-content"><div class="empty">${state.loading ? 'Loading league details...' : 'No matchup data available.'}</div></div></details>`; const previous = { selectedLeague: state.selectedLeague, matchup: state.matchup, allMatchups: state.allMatchups, players: state.players, stats: state.stats, projections: state.projections, espnStats: state.espnStats, playerGames: state.playerGames, leagueUsers: state.leagueUsers }; state.selectedLeague = league; state.matchup = snapshot.matchup; state.allMatchups = snapshot.allMatchups; state.players = snapshot.players; state.stats = snapshot.stats; state.projections = snapshot.projections || {}; state.espnStats = snapshot.espnStats || {}; state.playerGames = snapshot.playerGames || {}; state.leagueUsers = snapshot.leagueUsers; const matchup = snapshot.matchup; const score = matchup ? `${fmt(matchup.you.total)} - ${fmt(matchup.opponent.total)}` : 'No matchup'; const detail = matchup ? renderMatchup() : '<div class="empty">No matchup found for this week.</div>'; const pulse = renderAllMatchups(); const teamSummary = matchup ? `${matchupTeamLabel(matchup.you)} vs ${matchupTeamLabel(matchup.opponent)}` : 'No matchup data'; Object.assign(state, previous); return `<details class="league-card" ${league.league_id === state.selectedLeague?.league_id ? 'open' : ''}><summary><div class="league-summary"><div class="league-summary-copy"><strong>${esc(league.name)}</strong><small>${esc(teamSummary)}</small></div><div class="league-summary-score"><strong>${score}</strong><small>Week ${esc(state.nfl?.week || '-')}</small></div></div></summary><div class="panel-content">${detail}<details><summary><span><span class="eyebrow">League pulse</span><br><strong>All matchups</strong></span></summary><div class="panel-content">${pulse}</div></details></div></details>`; }
 function dashboardView() { const visible = includedLeagues(); $('app').innerHTML = `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">FS</div><div><div class="eyebrow">Sleeper live desk</div><h1>Fantasy Score</h1></div></div><div class="top-actions"><div class="connection"><span class="dot ${state.loading ? '' : 'live'}"></span>${state.loading ? 'Syncing' : 'Live'} · ${state.lastUpdated ? time(state.lastUpdated) : '-'}</div><button class="btn action-btn" id="refresh" aria-label="Refresh matchups"><span class="btn-text">Refresh</span><span class="btn-icon" aria-hidden="true">↻</span></button><button class="btn icon action-btn" id="open-settings" aria-label="Open settings"><span class="btn-text">Settings</span><span class="btn-icon" aria-hidden="true">⚙</span></button></div></header><section class="hero"><div><div class="eyebrow">${esc(state.nfl?.season || 'NFL')} season · Week ${esc(state.nfl?.week || '-')}</div><h1>Every league, one live desk.</h1><p class="hero-copy">${esc(state.user?.display_name || state.user?.username || '')} · ${visible.length} league${visible.length === 1 ? '' : 's'} included</p></div></section><div class="grid"><section class="stack"><div class="league-cards">${visible.length ? visible.map(renderLeagueCard).join('') : '<div class="matchup-card"><div class="empty">All leagues are excluded. Open settings to add one back.</div></div>'}</div></section><aside class="stack"><section><div class="eyebrow">Live ticker</div><h2 style="margin:4px 0 12px">Point swings</h2><div class="ticker">${renderTicker()}</div></section><section class="matchup-card"><div class="eyebrow">System status</div><h2 style="margin:5px 0 13px">Polling every ${settings.pollSeconds}s</h2><p class="matchup-meta">${settings.trackOpponent ? 'Tracking both lineups.' : 'Tracking your lineup.'}</p></section></aside></div></div>`; renderLeagueExclusions(); bindDashboard(); bindSettings(); bindLeagueExclusions(); }
-function bindDashboard() { $('refresh')?.addEventListener('click', () => pollAllLeagues(true)); $('open-settings')?.addEventListener('click', () => document.body.classList.add('settings-open')); $('close-settings')?.addEventListener('click', () => document.body.classList.remove('settings-open')); $('backdrop')?.addEventListener('click', () => document.body.classList.remove('settings-open')); bindVoiceSettings(); }
+function bindDashboard() {
+  $('refresh')?.addEventListener('click', () => pollAllLeagues(true));
+  $('open-settings')?.addEventListener('click', () => document.body.classList.add('settings-open'));
+  $('close-settings')?.addEventListener('click', () => document.body.classList.remove('settings-open'));
+  $('backdrop')?.addEventListener('click', () => document.body.classList.remove('settings-open'));
+  bindVoiceSettings();
+
+  document.querySelectorAll('[data-slot-row]').forEach(row => {
+    const toggle = () => {
+      const isExpanded = row.classList.toggle('is-expanded');
+      row.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+      const drawer = row.querySelector('.slot-detail-drawer');
+      if (drawer) drawer.setAttribute('aria-hidden', isExpanded ? 'false' : 'true');
+    };
+    row.addEventListener('click', toggle);
+    row.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        toggle();
+      }
+    });
+  });
+}
 async function pollAllLeagues(force = false) { checkForAppUpdate(); if (!force && !inGameWindow()) return; const original = state.selectedLeague; state.loading = true; try { const latestNfl = await api('/state/nfl'); const weekChanged = latestNfl.season !== state.nfl?.season || latestNfl.week !== state.nfl?.week; state.nfl = latestNfl; if (weekChanged) { state.leagueData = {}; localStorage.removeItem('fantasy-score-points'); } state.espnStats = await loadEspnStats(); state.projections = await api(`/projections/nfl/${state.nfl.season}/${state.nfl.week}`).catch(() => ({})); for (const league of includedLeagues()) { state.selectedLeague = league; await loadLeagueUsers(); await poll(true); state.leagueData[league.league_id] = { matchup: state.matchup, allMatchups: state.allMatchups, players: state.players, stats: state.stats, projections: state.projections, espnStats: state.espnStats, playerGames: state.playerGames, leagueUsers: state.leagueUsers }; } state.selectedLeague = original; state.lastUpdated = Date.now(); } catch (error) { state.error = error.message; } finally { state.loading = false; dashboardView(); schedulePoll(); } }
 async function connect(username) { state.loading = true; state.error = ''; setupView(); try { state.user = await api('/user/' + encodeURIComponent(username)); if (!state.user?.user_id) throw new Error('Sleeper username not found.'); localStorage.setItem('fantasy-score-user', username); state.nfl = await api('/state/nfl'); const leagues = await api(`/user/${state.user.user_id}/leagues/nfl/${state.nfl.season}`); state.leagues = (leagues || []).filter(league => league.status !== 'complete').slice(0, 10); if (!state.leagues.length) throw new Error('No active NFL leagues found for this season.'); state.selectedLeague = state.leagues[0]; await pollAllLeagues(true); } catch (error) { state.error = error.message + ' Check the spelling and try again.'; state.loading = false; setupView(); } }
 let updateBannerShown = false;
