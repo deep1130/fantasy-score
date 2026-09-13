@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.3.4';
+const APP_VERSION = 'v1.3.5';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
@@ -70,7 +70,7 @@ function setupView() {
 function loadingView(username) {
   $('app').innerHTML = `<main class="setup"><div class="brand"><div class="brand-mark">FS</div><div><div class="eyebrow">Sleeper live desk</div><h1>Fantasy Score</h1></div></div><h2>Loading live desk...</h2><p>Connecting to Sleeper for <strong>${esc(username)}</strong>...</p></main>`;
 }
-function renderAllMatchups() { if (!state.allMatchups.length) return '<div class="empty">No league matchups available for this week.</div>'; return `<div class="league-list">${state.allMatchups.map(item => `<div class="matchup-row ${item.mine ? 'active' : ''}"><div class="row-top"><span>${item.mine ? 'YOUR MATCHUP' : 'MATCHUP ' + item.id}</span><span>${item.count} rosters</span></div><div class="row-score"><span>${esc(item.a)}</span><span>${fmt(item.scoreA)} · ${fmt(item.scoreB)}</span><span>${esc(item.b)}</span></div></div>`).join('')}</div>`; }
+function renderAllMatchups() { if (!state.allMatchups || !state.allMatchups.length) return '<div class="empty">No league matchups available for this week.</div>'; return `<div class="league-list">${state.allMatchups.map(item => `<div class="matchup-row ${item.mine ? 'active' : ''}"><div class="row-top"><span>${item.mine ? 'YOUR MATCHUP' : 'MATCHUP ' + item.id}</span><span>${item.count} rosters</span></div><div class="row-score"><span>${esc(item.a)}</span><span>${fmt(item.scoreA)} · ${fmt(item.scoreB)}</span><span>${esc(item.b)}</span></div></div>`).join('')}</div>`; }
 function formatPlayerName(player) {
   if (!player || !player.full_name) return { full: 'Empty slot', short: 'Empty' };
   const full = player.full_name;
@@ -185,8 +185,8 @@ function getSlotPosition(index, myPlayer, oppPlayer) {
 }
 
 function renderMatchup(expandedSlots = new Set()) {
-  const team = state.matchup.you;
-  const opponent = state.matchup.opponent;
+  const team = state.matchup?.you || { starters: [], points: {}, deltas: {} };
+  const opponent = state.matchup?.opponent || { starters: [], points: {}, deltas: {} };
   const teamName = matchupTeamLabel(team);
   const opponentName = matchupTeamLabel(opponent);
   const teamProjection = projectedTotal(team);
@@ -567,10 +567,10 @@ function describeStatDelta(curr, prev, deltaPoints) {
   return phrases.length ? phrases.join(', ') : null;
 }
 function playerGame(id) { const player = (state.players && state.players[id]) || {}; const game = state.playerGames[normalizeTeam(player.team)]; return game ? `${game.status} · ${game.context}` : 'Game info pending'; }
-function matchupTeamLabel(team) { const row = state.allMatchups.find(item => item.mine); if (!row) return team.name; if (String(row.rosterA) === String(team.rosterId)) return row.a; if (String(row.rosterB) === String(team.rosterId)) return row.b; return team.name; }
+function matchupTeamLabel(team) { if (!team) return 'Unknown team'; const row = (state.allMatchups || []).find(item => item.mine); if (!row) return team.name || 'Team'; if (String(row.rosterA) === String(team.rosterId)) return row.a; if (String(row.rosterB) === String(team.rosterId)) return row.b; return team.name || 'Team'; }
 function projectionPoints(id) { const projection = state.projections[id] || {}; const value = projection.pts_ppr ?? projection.pts_half_ppr ?? projection.pts_std ?? projection.fantasy_points ?? projection.projected_points; return Number.isFinite(Number(value)) ? Number(value) : null; }
 function playerStatus(id, points) { const summary = statSummary(playerStats(id), points); const projection = projectionPoints(id); return summary !== 'No stats recorded' ? summary : projection === null ? summary : `Proj ${fmt(projection)}`; }
-function projectedTotal(team) { let hasProjection = false; const total = team.starters.reduce((sum, id) => { const actual = Number(team.points[id] || 0); const projection = projectionPoints(id); const status = state.playerGames[normalizeTeam(((state.players && state.players[id]) || {}).team)]?.status || ''; if (projection === null) return sum + actual; hasProjection = true; return sum + (/final|post/i.test(status) ? actual : Math.max(actual, projection)); }, 0); return hasProjection ? total : null; }
+function projectedTotal(team) { if (!team || !team.starters) return null; let hasProjection = false; const total = team.starters.reduce((sum, id) => { const actual = Number(team.points?.[id] || 0); const projection = projectionPoints(id); const status = state.playerGames[normalizeTeam(((state.players && state.players[id]) || {}).team)]?.status || ''; if (projection === null) return sum + actual; hasProjection = true; return sum + (/final|post/i.test(status) ? actual : Math.max(actual, projection)); }, 0); return hasProjection ? total : null; }
 function statSummary(stats, points = null) {
   const parts = [];
   if (Number(stats?.pass_td || 0)) parts.push(`${stats.pass_td} pass TD`);
@@ -807,18 +807,19 @@ function renderLeagueCard(league, openLeagues = new Set(), expandedSlots = new S
   const previous = { selectedLeague: state.selectedLeague, matchup: state.matchup, allMatchups: state.allMatchups, players: state.players, stats: state.stats, projections: state.projections, espnStats: state.espnStats, playerGames: state.playerGames, leagueUsers: state.leagueUsers };
   state.selectedLeague = league;
   state.matchup = snapshot.matchup;
-  state.allMatchups = snapshot.allMatchups;
+  state.allMatchups = snapshot.allMatchups || [];
   state.players = snapshot.players || state.players || {};
-  state.stats = snapshot.stats;
+  state.stats = snapshot.stats || {};
   state.projections = snapshot.projections || {};
   state.espnStats = snapshot.espnStats || {};
   state.playerGames = snapshot.playerGames || {};
-  state.leagueUsers = snapshot.leagueUsers;
+  state.leagueUsers = snapshot.leagueUsers || [];
   const matchup = snapshot.matchup;
-  const score = matchup ? `${fmt(matchup.you.total)} - ${fmt(matchup.opponent.total)}` : 'No matchup';
-  const detail = matchup ? renderMatchup(expandedSlots) : '<div class="empty">No matchup found for this week.</div>';
+  const hasBothTeams = Boolean(matchup?.you && matchup?.opponent);
+  const score = hasBothTeams ? `${fmt(matchup.you.total)} - ${fmt(matchup.opponent.total)}` : 'No matchup';
+  const detail = hasBothTeams ? renderMatchup(expandedSlots) : '<div class="empty">No matchup found for this week.</div>';
   const pulse = renderAllMatchups();
-  const teamSummary = matchup ? `${matchupTeamLabel(matchup.you)} vs ${matchupTeamLabel(matchup.opponent)}` : 'No matchup data';
+  const teamSummary = hasBothTeams ? `${matchupTeamLabel(matchup.you)} vs ${matchupTeamLabel(matchup.opponent)}` : 'No matchup data';
   Object.assign(state, previous);
   const isOpen = openLeagues.has(league.league_id) || (openLeagues.size === 0 && league.league_id === state.selectedLeague?.league_id);
   return `<details class="league-card" data-league-id="${league.league_id}" ${isOpen ? 'open' : ''}><summary><div class="league-summary"><div class="league-summary-copy"><strong>${esc(league.name)}</strong><small>${esc(teamSummary)}</small></div><div class="league-summary-score"><strong>${score}</strong><small>Week ${esc(state.nfl?.week || '-')}</small></div></div></summary><div class="panel-content">${detail}<details><summary><span><span class="eyebrow">League pulse</span><br><strong>All matchups</strong></span></summary><div class="panel-content">${pulse}</div></details></div></details>`;
@@ -1030,20 +1031,35 @@ const cachedDashboard = readStorage('fantasy-score-dashboard-cache', null);
 const cachedTicker = readStorage('fantasy-score-ticker', cachedDashboard?.ticker || []);
 state.ticker = dedupeTicker(cachedTicker);
 if (savedUser) {
+  let restored = false;
   if (cachedDashboard && cachedDashboard.user?.username?.toLowerCase() === savedUser.toLowerCase()) {
-    state.user = cachedDashboard.user;
-    state.nfl = cachedDashboard.nfl;
-    state.leagues = cachedDashboard.leagues || [];
-    state.selectedLeague = cachedDashboard.selectedLeague || state.leagues[0];
-    state.leagueData = cachedDashboard.leagueData || {};
-    state.players = cachedDashboard.rosterPlayers || state.players || {};
-    state.lastUpdated = cachedDashboard.lastUpdated;
-    state.loading = true;
-    dashboardView();
-  } else {
+    try {
+      state.user = cachedDashboard.user;
+      state.nfl = cachedDashboard.nfl;
+      state.leagues = cachedDashboard.leagues || [];
+      state.selectedLeague = cachedDashboard.selectedLeague || state.leagues[0];
+      state.leagueData = cachedDashboard.leagueData || {};
+      state.players = cachedDashboard.rosterPlayers || state.players || {};
+      state.lastUpdated = cachedDashboard.lastUpdated;
+      state.loading = true;
+      dashboardView();
+      restored = true;
+    } catch (e) {
+      console.warn('Cached dashboard restore failed, falling back to loading view:', e);
+    }
+  }
+  if (!restored) {
     loadingView(savedUser);
   }
   connect(savedUser);
 } else {
   setupView();
 }
+
+window.addEventListener('error', event => {
+  console.error('[Fantasy Score] Global error captured:', event.error || event.message);
+  const appEl = $('app');
+  if (appEl && (!appEl.innerHTML || appEl.innerHTML.trim() === '')) {
+    appEl.innerHTML = `<main class="setup"><div class="brand"><div class="brand-mark">FS</div><div><div class="eyebrow">Recovery desk</div><h1>Fantasy Score</h1></div></div><h2>Temporary sync error</h2><p>Something interrupted the live desk sync. Click below to reconnect cleanly.</p><div style="display:flex; gap:10px; margin-top:16px"><button class="btn primary" onclick="localStorage.removeItem('fantasy-score-dashboard-cache'); window.location.reload(true);">Reconnect</button></div></main>`;
+  }
+});
