@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.2.7';
+const APP_VERSION = 'v1.2.8';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
@@ -391,7 +391,7 @@ function statSummary(stats, points = null) {
   if (points !== null && Number(points) > 0) return `+${fmt(points)} pts`;
   return Number(points) === 0 && points !== null ? 'No stats recorded' : 'Live stats pending';
 }
-function renderTicker() { return state.ticker.length ? state.ticker.map(item => `<div class="ticker-item"><i></i><div><strong>${esc(item.player)}</strong> gained ${fmt(item.delta)} points<small>${esc(item.stats)} · ${esc(item.team)} · Score ${fmt(item.you)} - ${fmt(item.opponent)}</small></div><time>${time(item.at)}</time></div>`).join('') : '<div class="empty">Score swings will appear here as players add points.</div>'; }
+function renderTicker() { return state.ticker.length ? state.ticker.map(item => `<div class="ticker-item"><i></i><div><strong>${esc(item.player)}</strong> gained ${fmt(item.delta)} points${item.playerTotal !== undefined ? ` (${fmt(item.playerTotal)} pts total)` : ''}<small>${esc(item.stats)} · ${esc(item.team)} · Score ${fmt(item.you)} - ${fmt(item.opponent)}</small></div><time>${time(item.at)}</time></div>`).join('') : '<div class="empty">Score swings will appear here as players add points.</div>'; }
 function bindSettings() { $('poll-interval').value = settings.pollSeconds; $('poll-value').textContent = pollLabel(settings.pollSeconds); $('track-opponent').checked = settings.trackOpponent; $('voice-enabled').checked = settings.voice; $('voice-volume').value = settings.volume; $('volume-value').textContent = Math.round(settings.volume * 100) + '%'; $('window-enabled').checked = settings.gameWindow; $('wake-enabled').checked = settings.wake; $('poll-interval').oninput = event => { settings.pollSeconds = Number(event.target.value); saveSettings(); bindSettings(); schedulePoll(); }; $('voice-volume').oninput = event => { settings.volume = Number(event.target.value); saveSettings(); bindSettings(); }; [['track-opponent','trackOpponent'], ['voice-enabled','voice'], ['window-enabled','gameWindow'], ['wake-enabled','wake']].forEach(([id, key]) => $(id).onchange = event => { settings[key] = event.target.checked; saveSettings(); if (key === 'wake') setWakeLock(settings.wake); }); $('reset-user').onclick = () => { localStorage.removeItem('fantasy-score-user'); state.user = null; state.leagues = []; document.body.classList.remove('settings-open'); setupView(); }; }
 
 async function loadLeagueUsers() {
@@ -459,6 +459,7 @@ async function poll(force = false) {
           stats: summary,
           team: team.name,
           delta,
+          playerTotal: Number(points || 0),
           at: Date.now(),
           you: you.total,
           opponent: opponent.total
@@ -506,7 +507,8 @@ function announce(changes) {
   const item = audible[0];
   const statText = item.stats && !/no stats/i.test(item.stats) && !item.stats.startsWith('+') ? `, ${item.stats},` : '';
   const teamContext = item.team ? ` for ${item.team}` : '';
-  speakText(`${item.player}${statText} gained ${fmt(item.delta)} points${teamContext}. Current score: You ${fmt(item.you)}, Opponent ${fmt(item.opponent)}.`);
+  const totalText = item.playerTotal !== undefined ? `, now at ${fmt(item.playerTotal)} points` : '';
+  speakText(`${item.player}${statText} gained ${fmt(item.delta)} points${teamContext}${totalText}. Current score: You ${fmt(item.you)}, Opponent ${fmt(item.opponent)}.`);
 }
 function schedulePoll() { clearTimeout(pollTimer); pollTimer = setTimeout(() => pollAllLeagues(), settings.pollSeconds * 1000); }
 async function setWakeLock(enabled) { if (!navigator.wakeLock) return; try { if (enabled && !state.wakeLock) state.wakeLock = await navigator.wakeLock.request('screen'); if (!enabled && state.wakeLock) { await state.wakeLock.release(); state.wakeLock = null; } } catch (error) { console.warn('Wake lock unavailable', error); } }
