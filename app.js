@@ -8,9 +8,9 @@ const fmt = value => Number(value || 0).toFixed(2).replace(/\.00$/, '');
 function dedupeTicker(items) {
   const seen = new Set();
   return (items || []).filter(item => {
-    if (item.play === 'Turnover / point loss' && Math.abs(item.delta) !== 2 && Math.abs(item.delta) !== 1) {
-      return false;
-    }
+    const numDelta = Number(item.delta || 0);
+    if (numDelta < -2.6) return false;
+    if (item.play === 'Turnover / point loss') return false;
     const key = `${item.leagueId || ''}|${item.rosterId || ''}|${item.player}|${item.team}|${fmt(item.delta)}|${fmt(item.playerTotal)}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -138,7 +138,8 @@ function fullStatBreakdown(id, points = null) {
     const xp = stats.xpm !== undefined ? `, ${stats.xpm} XP` : '';
     lines.push(`<strong>Kick:</strong> ${fg}${xp}`);
   }
-  if (stats.sack || stats.def_int || stats.fum_rec || stats.def_td || stats.def_safety || stats.pts_allowed !== undefined) {
+  const isDef = ((state.players && state.players[id]) || {}).position === 'DEF';
+  if (isDef && (stats.sack || stats.def_int || stats.fum_rec || stats.def_td || stats.def_safety || stats.pts_allowed !== undefined)) {
     const s = [];
     if (stats.sack) s.push(`${stats.sack} sk`);
     if (stats.def_int) s.push(`${stats.def_int} INT`);
@@ -530,8 +531,8 @@ function describeStatDelta(curr, prev, deltaPoints, isDef = false) {
   };
 
   const phrases = [];
-  if (d.pass_int > 0) phrases.push(d.pass_int === 1 ? 'INT thrown' : `${d.pass_int} INTs thrown`);
-  if (d.fum_lost > 0) phrases.push(d.fum_lost === 1 ? 'fumble lost' : `${d.fum_lost} fumbles lost`);
+  if (d.pass_int > 0) phrases.push(d.pass_int === 1 ? 'INT thrown (-2 pts)' : `${d.pass_int} INTs thrown`);
+  if (d.fum_lost > 0) phrases.push(d.fum_lost === 1 ? 'fumble lost (-2 pts)' : `${d.fum_lost} fumbles lost`);
   if (isDef && d.def_int > 0) phrases.push(d.def_int === 1 ? '+1 INT takeaway' : `+${d.def_int} INT takeaways`);
   if (isDef && d.fum_rec > 0) phrases.push(d.fum_rec === 1 ? '+1 fumble rec' : `+${d.fum_rec} fumble rec`);
   if (isDef && d.def_safety > 0) phrases.push(d.def_safety === 1 ? '+1 safety' : `+${d.def_safety} safeties`);
@@ -574,20 +575,31 @@ function describeStatDelta(curr, prev, deltaPoints, isDef = false) {
 }
 function isLegitimatePointDrop(curr, prev, delta, isDef = false) {
   if (isDef) {
-    if (!prev) return true;
+    if (!prev || !Object.keys(prev).length) return true;
     if ((curr?.pts_allowed || 0) > (prev.pts_allowed || 0)) return true;
-    return delta <= -1;
+    return delta <= -0.5 && delta >= -10;
   }
-  if (curr && prev) {
-    if ((curr.pass_int || 0) > (prev.pass_int || 0)) return true;
-    if ((curr.fum_lost || 0) > (prev.fum_lost || 0)) return true;
-    if ((curr.rush_yd || 0) < (prev.rush_yd || 0)) return true;
-    if ((curr.rec_yd || 0) < (prev.rec_yd || 0)) return true;
-    if ((curr.pass_yd || 0) < (prev.pass_yd || 0)) return true;
+  // Offensive players:
+  // Cannot lose more than 2.8 points on any single play in standard/PPR fantasy
+  if (delta < -2.8) {
+    return false;
   }
-  if (Math.abs(delta + 2) < 0.01 || Math.abs(delta + 1) < 0.01) {
+  // Turnovers: typically -2.0 points (or -1.5 to -2.5)
+  const isTurnoverDelta = delta <= -1.5 && delta >= -2.5;
+  const newInt = curr && prev && Object.keys(prev).length > 0 && ((curr.pass_int || 0) > (prev.pass_int || 0));
+  const newFum = curr && prev && Object.keys(prev).length > 0 && ((curr.fum_lost || 0) > (prev.fum_lost || 0));
+  if (isTurnoverDelta && (newInt || newFum)) {
     return true;
   }
+  // Minor yardage loss on a play (tackle for loss / sack / loss of yards): -0.05 to -0.6
+  if (delta >= -0.6 && delta <= -0.05) {
+    if (curr && prev && Object.keys(prev).length > 0) {
+      if ((curr.rush_yd || 0) < (prev.rush_yd || 0) || (curr.rec_yd || 0) < (prev.rec_yd || 0) || (curr.pass_yd || 0) < (prev.pass_yd || 0)) {
+        return true;
+      }
+    }
+  }
+  // Reject all other drops (stale cache flapping, missing stats feed)
   return false;
 }
 function playerGame(id) { const player = (state.players && state.players[id]) || {}; const game = state.playerGames[normalizeTeam(player.team)]; return game ? `${game.status} · ${game.context}` : 'Game info pending'; }
@@ -707,9 +719,27 @@ async function poll(force = false) {
   const rival = (matchups || []).find(item => item.matchup_id === mine?.matchup_id && item.roster_id !== roster?.roster_id);
   state.previousPoints = state.previousPoints || readStorage('fantasy-score-points', {});
   const previous = state.previousPoints;
+  state.previousStats = state.previousStats || readStorage('fantasy-score-stats-history', {});
+  const previousStats = state.previousStats;
   const makeTeam = (item, isMine) => {
-    const points = item?.players_points || {};
+    const rawPoints = item?.players_points || {};
     const starters = item?.starters || [];
+    const points = { ...rawPoints };
+    starters.forEach(id => {
+      if (!id || id === '0') return;
+      const key = `${state.selectedLeague.league_id}:${item?.roster_id || ''}:${id}`;
+      const old = Number(previous[key]);
+      const current = Number(points[id] || 0);
+      const isDef = ((state.players && state.players[id]) || {}).position === 'DEF';
+      if (Number.isFinite(old) && current < old) {
+        const pStats = playerStats(id);
+        const prevPStats = previousStats[key];
+        const delta = current - old;
+        if (!isLegitimatePointDrop(pStats, prevPStats, delta, isDef)) {
+          points[id] = old;
+        }
+      }
+    });
     const deltas = {};
     const total = starters.reduce((sum, id) => sum + Number(points[id] || 0), 0);
     const name = getRosterDisplayName(item?.roster_id, rosters, isMine);
@@ -718,8 +748,6 @@ async function poll(force = false) {
   const you = makeTeam({ ...roster, players_points: mine?.players_points, starters: mine?.starters }, true);
   const opponent = makeTeam(rival, false);
   const changes = [];
-  state.previousStats = state.previousStats || readStorage('fantasy-score-stats-history', {});
-  const previousStats = state.previousStats;
   [you, opponent].forEach(team => {
     if (!team.mine && !settings.trackOpponent) return;
     const startersSet = new Set((team.starters || []).filter(id => id && id !== '0'));
@@ -738,10 +766,20 @@ async function poll(force = false) {
       if (Object.prototype.hasOwnProperty.call(previous, key) && Math.abs(delta) > 0.001) {
         if (delta < 0 && !isLegitimatePointDrop(pStats, prevPStats, delta, isDef)) {
           // Stale CDN edge cache: ignore false score drop and do not downgrade previous[key]
+          team.points[id] = old;
           return;
         }
         team.deltas[id] = delta;
-        const play = describeStatDelta(pStats, prevPStats, delta, isDef) || (delta < 0 ? (isDef ? 'Points allowed' : 'Turnover / point loss') : null);
+        const play = describeStatDelta(pStats, prevPStats, delta, isDef) ||
+          (delta < 0
+            ? (isDef
+                ? 'Points allowed'
+                : ((pStats?.fum_lost || 0) > (prevPStats?.fum_lost || 0)
+                    ? 'Fumble lost (-2 pts)'
+                    : ((pStats?.pass_int || 0) > (prevPStats?.pass_int || 0)
+                        ? 'Interception thrown (-2 pts)'
+                        : 'Stat adjustment')))
+            : null);
         const summary = statSummary(pStats, delta, isDef);
         changes.push({
           player: (state.players && state.players[id]?.full_name) || id,
