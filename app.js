@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.2.3';
+const APP_VERSION = 'v1.2.4';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 120, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: true, wake: false, excludedLeagues: [] };
@@ -300,18 +300,134 @@ function matchupTeamLabel(team) { const row = state.allMatchups.find(item => ite
 function projectionPoints(id) { const projection = state.projections[id] || {}; const value = projection.pts_ppr ?? projection.pts_half_ppr ?? projection.pts_std ?? projection.fantasy_points ?? projection.projected_points; return Number.isFinite(Number(value)) ? Number(value) : null; }
 function playerStatus(id, points) { const summary = statSummary(playerStats(id), points); const projection = projectionPoints(id); return summary !== 'No stats recorded' ? summary : projection === null ? summary : `Proj ${fmt(projection)}`; }
 function projectedTotal(team) { let hasProjection = false; const total = team.starters.reduce((sum, id) => { const actual = Number(team.points[id] || 0); const projection = projectionPoints(id); const status = state.playerGames[normalizeTeam((state.players[id] || {}).team)]?.status || ''; if (projection === null) return sum + actual; hasProjection = true; return sum + (/final|post/i.test(status) ? actual : Math.max(actual, projection)); }, 0); return hasProjection ? total : null; }
-function statSummary(stats, points = null) { const parts = []; if (Number(stats?.pass_td || 0)) parts.push(`${stats.pass_td} pass TD`); if (Number(stats?.rush_td || 0)) parts.push(`${stats.rush_td} rush TD`); if (Number(stats?.rec_td || 0)) parts.push(`${stats.rec_td} rec TD`); if (Number(stats?.ret_td || 0)) parts.push(`${stats.ret_td} return TD`); if (Number(stats?.def_td || 0)) parts.push(`${stats.def_td} defensive TD`); if (Number(stats?.rush_yd || 0)) parts.push(`${stats.rush_yd} rush yds`); if (Number(stats?.rec || 0)) parts.push(`${stats.rec} rec`); if (Number(stats?.rec_yd || 0)) parts.push(`${stats.rec_yd} rec yds`); if (Number(stats?.pass_yd || 0)) parts.push(`${stats.pass_yd} pass yds`); if (parts.length) return parts.join(' · '); return Number(points) === 0 ? 'No stats recorded' : 'Live stats pending'; }
+function statSummary(stats, points = null) {
+  const parts = [];
+  if (Number(stats?.pass_td || 0)) parts.push(`${stats.pass_td} pass TD`);
+  if (Number(stats?.rush_td || 0)) parts.push(`${stats.rush_td} rush TD`);
+  if (Number(stats?.rec_td || 0)) parts.push(`${stats.rec_td} rec TD`);
+  if (Number(stats?.ret_td || 0)) parts.push(`${stats.ret_td} return TD`);
+  if (Number(stats?.def_td || 0)) parts.push(`${stats.def_td} defensive TD`);
+  if (Number(stats?.rush_yd || 0)) parts.push(`${stats.rush_yd} rush yds`);
+  if (Number(stats?.rec || 0)) parts.push(`${stats.rec} rec`);
+  if (Number(stats?.rec_yd || 0)) parts.push(`${stats.rec_yd} rec yds`);
+  if (Number(stats?.pass_yd || 0)) parts.push(`${stats.pass_yd} pass yds`);
+  if (parts.length) return parts.join(' · ');
+  if (points !== null && Number(points) > 0) return `+${fmt(points)} pts`;
+  return Number(points) === 0 && points !== null ? 'No stats recorded' : 'Live stats pending';
+}
 function renderTicker() { return state.ticker.length ? state.ticker.map(item => `<div class="ticker-item"><i></i><div><strong>${esc(item.player)}</strong> gained ${fmt(item.delta)} points<small>${esc(item.stats)} · ${esc(item.team)} · Score ${fmt(item.you)} - ${fmt(item.opponent)}</small></div><time>${time(item.at)}</time></div>`).join('') : '<div class="empty">Score swings will appear here as players add points.</div>'; }
 function bindSettings() { $('poll-interval').value = settings.pollSeconds; $('poll-value').textContent = settings.pollSeconds + 's'; $('track-opponent').checked = settings.trackOpponent; $('voice-enabled').checked = settings.voice; $('voice-volume').value = settings.volume; $('volume-value').textContent = Math.round(settings.volume * 100) + '%'; $('window-enabled').checked = settings.gameWindow; $('wake-enabled').checked = settings.wake; $('poll-interval').oninput = event => { settings.pollSeconds = Number(event.target.value); saveSettings(); bindSettings(); schedulePoll(); }; $('voice-volume').oninput = event => { settings.volume = Number(event.target.value); saveSettings(); bindSettings(); }; [['track-opponent','trackOpponent'], ['voice-enabled','voice'], ['window-enabled','gameWindow'], ['wake-enabled','wake']].forEach(([id, key]) => $(id).onchange = event => { settings[key] = event.target.checked; saveSettings(); if (key === 'wake') setWakeLock(settings.wake); }); $('reset-user').onclick = () => { localStorage.removeItem('fantasy-score-user'); state.user = null; state.leagues = []; document.body.classList.remove('settings-open'); setupView(); }; }
 
 async function loadLeagueUsers() { state.leagueUsers = await api(`/league/${state.selectedLeague.league_id}/users`); }
-async function poll(force = false) { if (!state.selectedLeague || (!force && !inGameWindow())) return; state.loading = true; try { const [matchups, rosters, players, stats] = await Promise.all([api(`/league/${state.selectedLeague.league_id}/matchups/${state.nfl.week}`), api(`/league/${state.selectedLeague.league_id}/rosters`), api('/players/nfl'), api(`/stats/nfl/${state.nfl.season}/${state.nfl.week}`)]); state.players = players || {}; state.stats = stats || {}; const roster = rosters.find(item => item.owner_id === state.user.user_id); const mine = (matchups || []).find(item => item.roster_id === roster?.roster_id); const rival = (matchups || []).find(item => item.matchup_id === mine?.matchup_id && item.roster_id !== roster?.roster_id); const previous = readStorage('fantasy-score-points', {}); const makeTeam = (item, isMine) => { const points = item?.players_points || {}; const starters = item?.starters || []; const deltas = {}; const total = starters.reduce((sum, id) => sum + Number(points[id] || 0), 0); const rosterInfo = rosters.find(rosterItem => rosterItem.roster_id === item?.roster_id); return { name: rosterInfo?.metadata?.team_name || rosterInfo?.metadata?.name || rosterInfo?.team_name || (isMine ? 'Your team' : `Team ${item?.roster_id || '-'}`), rosterId: item?.roster_id || '', starters, points, deltas, total, mine: isMine }; }; const you = makeTeam({ ...roster, players_points: mine?.players_points, starters: mine?.starters }, true); const opponent = makeTeam(rival, false); const changes = []; [you, opponent].forEach(team => { if (!team.mine && !settings.trackOpponent) return; Object.entries(team.points).forEach(([id, points]) => { const key = `${state.selectedLeague.league_id}:${team.rosterId}:${id}`; const old = Number(previous[key] || 0); const delta = Number(points || 0) - old; if (Object.prototype.hasOwnProperty.call(previous, key) && delta > 0) { team.deltas[id] = delta; changes.push({ player: state.players[id]?.full_name || id, stats: statSummary(state.stats[id]), team: team.name, delta, at: Date.now(), you: you.total, opponent: opponent.total }); } previous[key] = points; }); }); localStorage.setItem('fantasy-score-points', JSON.stringify(previous)); state.matchup = mine ? { you, opponent } : null; state.allMatchups = groupMatchups(matchups, rosters, mine); console.info(`[Fantasy Score] Matchup summary: You ${fmt(you.total)} - Opponent ${fmt(opponent.total)}`); state.ticker = [...changes.reverse(), ...state.ticker].slice(0, 30); if (changes.length) announce(changes); state.lastUpdated = Date.now(); state.error = ''; } catch (error) { state.error = error.message; } finally { state.loading = false; dashboardView(); schedulePoll(); } }
-function groupMatchups(matchups, rosters, mine) { const groups = {}; (matchups || []).filter(item => item.matchup_id).forEach(item => (groups[item.matchup_id] ||= []).push(item)); return Object.entries(groups).map(([id, items]) => { const first = items[0], second = items[1] || {}; const name = rosterId => { const roster = rosters.find(item => item.roster_id === rosterId); const user = state.leagueUsers.find(item => item.user_id === roster?.owner_id); const teamName = roster?.metadata?.team_name || roster?.metadata?.name || roster?.team_name || user?.metadata?.team_name; const ownerName = user?.display_name || user?.username; return teamName && ownerName && teamName !== ownerName ? `${teamName} (${ownerName})` : teamName || ownerName || `Team ${rosterId || '-'}`; }; return { id, count: items.length, mine: id === String(mine?.matchup_id), rosterA: first.roster_id, rosterB: second.roster_id, a: name(first.roster_id), b: name(second.roster_id), scoreA: first.points || 0, scoreB: second.points || 0 }; }); }
+function getRosterDisplayName(rosterId, rosters, isMine = false) {
+  const roster = (rosters || []).find(r => r.roster_id === rosterId);
+  const user = (state.leagueUsers || []).find(u => u.user_id === roster?.owner_id);
+  const teamName = roster?.metadata?.team_name || roster?.metadata?.name || roster?.team_name || user?.metadata?.team_name;
+  const ownerName = user?.display_name || user?.username;
+  if (teamName && ownerName && teamName !== ownerName) return `${teamName} (${ownerName})`;
+  if (teamName) return teamName;
+  if (ownerName) return ownerName;
+  return isMine ? 'Your team' : `Team ${rosterId || '-'}`;
+}
+
+async function poll(force = false) {
+  if (!state.selectedLeague || (!force && !inGameWindow())) return;
+  state.loading = true;
+  try {
+    const [matchups, rosters, players, stats] = await Promise.all([
+      api(`/league/${state.selectedLeague.league_id}/matchups/${state.nfl.week}`),
+      api(`/league/${state.selectedLeague.league_id}/rosters`),
+      api('/players/nfl'),
+      api(`/stats/nfl/${state.nfl.season}/${state.nfl.week}`)
+    ]);
+    state.players = players || {};
+    state.stats = stats || {};
+    const roster = rosters.find(item => item.owner_id === state.user.user_id);
+    const mine = (matchups || []).find(item => item.roster_id === roster?.roster_id);
+    const rival = (matchups || []).find(item => item.matchup_id === mine?.matchup_id && item.roster_id !== roster?.roster_id);
+    const previous = readStorage('fantasy-score-points', {});
+    const makeTeam = (item, isMine) => {
+      const points = item?.players_points || {};
+      const starters = item?.starters || [];
+      const deltas = {};
+      const total = starters.reduce((sum, id) => sum + Number(points[id] || 0), 0);
+      const name = getRosterDisplayName(item?.roster_id, rosters, isMine);
+      return { name, rosterId: item?.roster_id || '', starters, points, deltas, total, mine: isMine };
+    };
+    const you = makeTeam({ ...roster, players_points: mine?.players_points, starters: mine?.starters }, true);
+    const opponent = makeTeam(rival, false);
+    const changes = [];
+    [you, opponent].forEach(team => {
+      if (!team.mine && !settings.trackOpponent) return;
+      Object.entries(team.points).forEach(([id, points]) => {
+        const key = `${state.selectedLeague.league_id}:${team.rosterId}:${id}`;
+        const old = Number(previous[key] || 0);
+        const delta = Number(points || 0) - old;
+        if (Object.prototype.hasOwnProperty.call(previous, key) && delta > 0) {
+          team.deltas[id] = delta;
+          const pStats = playerStats(id);
+          const summary = statSummary(pStats, delta);
+          changes.push({
+            player: state.players[id]?.full_name || id,
+            stats: summary,
+            team: team.name,
+            delta,
+            at: Date.now(),
+            you: you.total,
+            opponent: opponent.total
+          });
+        }
+        previous[key] = points;
+      });
+    });
+    localStorage.setItem('fantasy-score-points', JSON.stringify(previous));
+    state.matchup = mine ? { you, opponent } : null;
+    state.allMatchups = groupMatchups(matchups, rosters, mine);
+    console.info(`[Fantasy Score] Matchup summary: You ${fmt(you.total)} - Opponent ${fmt(opponent.total)}`);
+    state.ticker = [...changes.reverse(), ...state.ticker].slice(0, 30);
+    if (changes.length) announce(changes);
+    state.lastUpdated = Date.now();
+    state.error = '';
+  } catch (error) {
+    state.error = error.message;
+  } finally {
+    state.loading = false;
+    dashboardView();
+    schedulePoll();
+  }
+}
+
+function groupMatchups(matchups, rosters, mine) {
+  const groups = {};
+  (matchups || []).filter(item => item.matchup_id).forEach(item => (groups[item.matchup_id] ||= []).push(item));
+  return Object.entries(groups).map(([id, items]) => {
+    const first = items[0], second = items[1] || {};
+    return {
+      id,
+      count: items.length,
+      mine: id === String(mine?.matchup_id),
+      rosterA: first.roster_id,
+      rosterB: second.roster_id,
+      a: getRosterDisplayName(first.roster_id, rosters, false),
+      b: getRosterDisplayName(second.roster_id, rosters, false),
+      scoreA: first.points || 0,
+      scoreB: second.points || 0
+    };
+  });
+}
 let kokoroTtsPromise = null;
 async function getKokoroTts() { if (!kokoroTtsPromise) { kokoroTtsPromise = import('https://cdn.jsdelivr.net/npm/kokoro-js@1.0.0/+esm').then(({ KokoroTTS }) => KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-ONNX', { dtype: 'q8' })).catch(err => { kokoroTtsPromise = null; throw err; }); } return kokoroTtsPromise; }
 function playRawAudio(raw) { if (!raw) return Promise.resolve(); try { const AudioCtx = window.AudioContext || window.webkitAudioContext; if (AudioCtx) { const ctx = new AudioCtx(); if (ctx.state === 'suspended') ctx.resume().catch(() => {}); const samples = raw.data || raw.audio; const sr = raw.sampling_rate || 24000; if (samples instanceof Float32Array) { const buffer = ctx.createBuffer(1, samples.length, sr); buffer.getChannelData(0).set(samples); const source = ctx.createBufferSource(); source.buffer = buffer; const gain = ctx.createGain(); gain.gain.value = Number(settings.volume ?? 0.8); source.connect(gain); gain.connect(ctx.destination); return new Promise(resolve => { source.onended = () => { ctx.close().catch(() => {}); resolve(); }; source.start(0); }); } } } catch (err) { console.warn('AudioContext playback failed, trying Blob URL:', err); } if (typeof raw.toBlob === 'function') { return new Promise((resolve, reject) => { const url = URL.createObjectURL(raw.toBlob()); const player = new Audio(url); player.volume = Number(settings.volume ?? 0.8); player.onended = () => { URL.revokeObjectURL(url); resolve(); }; player.onerror = err => { URL.revokeObjectURL(url); reject(err); }; player.play().catch(reject); }); } return Promise.resolve(); }
 async function speakText(text) { try { const tts = await getKokoroTts(); const raw = await tts.generate(text, { voice: settings.kokoroVoice, speed: settings.voiceRate }); await playRawAudio(raw); } catch (error) { console.warn('Kokoro voice announcement skipped.', error); } }
-function announce(changes) { if (!settings.voice) return; const audible = changes.filter(item => item.delta >= Number(settings.voiceMinPoints || 0)); if (!audible.length) return; const item = audible[0]; speakText(`${item.player} ${item.stats}. Gained ${fmt(item.delta)} points. Current score: You ${fmt(item.you)}, Opponent ${fmt(item.opponent)}.`); }
+function announce(changes) {
+  if (!settings.voice) return;
+  const audible = changes.filter(item => item.delta >= Number(settings.voiceMinPoints || 0));
+  if (!audible.length) return;
+  const item = audible[0];
+  const statText = item.stats && !/no stats/i.test(item.stats) && !item.stats.startsWith('+') ? `, ${item.stats},` : '';
+  const teamContext = item.team ? ` for ${item.team}` : '';
+  speakText(`${item.player}${statText} gained ${fmt(item.delta)} points${teamContext}. Current score: You ${fmt(item.you)}, Opponent ${fmt(item.opponent)}.`);
+}
 function schedulePoll() { clearTimeout(pollTimer); pollTimer = setTimeout(() => pollAllLeagues(), settings.pollSeconds * 1000); }
 async function setWakeLock(enabled) { if (!navigator.wakeLock) return; try { if (enabled && !state.wakeLock) state.wakeLock = await navigator.wakeLock.request('screen'); if (!enabled && state.wakeLock) { await state.wakeLock.release(); state.wakeLock = null; } } catch (error) { console.warn('Wake lock unavailable', error); } }
 const includedLeagues = () => state.leagues.filter(league => !settings.excludedLeagues.includes(league.league_id));
