@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.3.11';
+const APP_VERSION = 'v1.3.12';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
@@ -49,7 +49,17 @@ async function ensurePlayersLoaded() {
   }
   return state.players;
 }
-const time = value => new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const time = value => {
+  if (!value) return '-';
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return '-';
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (isToday) return timeStr;
+  const dayStr = d.toLocaleDateString([], { weekday: 'short' });
+  return `${dayStr} ${timeStr}`;
+};
 const inGameWindow = () => {
   if (!settings.gameWindow) return true;
   if (state.playerGames && Object.values(state.playerGames).some(g => !/final|scheduled/i.test(g.status || ''))) return true;
@@ -742,7 +752,7 @@ function getRosterDisplayName(rosterId, rosters, isMine = false, leagueUsers = s
   return isMine ? 'Your team' : `Team ${rosterId || '-'}`;
 }
 
-async function poll(targetLeague = state.selectedLeague, force = false) {
+async function poll(targetLeague = state.selectedLeague, force = false, isCatchUp = false) {
   if (!targetLeague) return null;
   const leagueId = targetLeague.league_id;
   state.rostersCache = state.rostersCache || {};
@@ -777,7 +787,7 @@ async function poll(targetLeague = state.selectedLeague, force = false) {
       const old = Number(previous[key]);
       const current = Number(points[id] || 0);
       const isDef = ((state.players && state.players[id]) || {}).position === 'DEF';
-      if (Number.isFinite(old) && current < old) {
+      if (!isCatchUp && Number.isFinite(old) && current < old) {
         const pStats = playerStats(id);
         const prevPStats = previousStats[key];
         const delta = current - old;
@@ -809,7 +819,7 @@ async function poll(targetLeague = state.selectedLeague, force = false) {
       const pStats = playerStats(id);
       const prevPStats = previousStats[key];
 
-      if (Object.prototype.hasOwnProperty.call(previous, key) && Math.abs(delta) > 0.001) {
+      if (!isCatchUp && Object.prototype.hasOwnProperty.call(previous, key) && Math.abs(delta) > 0.001) {
         if (delta < 0 && !isLegitimatePointDrop(pStats, prevPStats, delta, isDef)) {
           team.points[id] = old;
           return;
@@ -846,8 +856,16 @@ async function poll(targetLeague = state.selectedLeague, force = false) {
                     : ((pStats?.pass_int || 0) > (prevPStats?.pass_int || 0)
                         ? 'Interception thrown'
                         : 'Stat adjustment')))
-            : null);
-        const summary = statSummary(pStats, delta, isDef);
+            : (delta >= 5.5
+                ? 'Touchdown'
+                : (delta >= 2.8 && delta <= 3.2
+                    ? 'Field goal'
+                    : (delta >= 0.8 && delta <= 1.2
+                        ? 'Extra point'
+                        : 'Scoring play'))));
+        const summary = (pStats && Object.keys(pStats).length)
+          ? statSummary(pStats, delta, isDef)
+          : `${delta > 0 ? '+' : ''}${fmt(delta)} pts`;
         changes.push({
           player: (state.players && state.players[id]?.full_name) || id,
           leagueId: targetLeague.league_id || '',
@@ -953,7 +971,7 @@ function dashboardView() {
   const expandedSlots = new Set([...document.querySelectorAll('[data-slot-row].is-expanded')].map(r => r.dataset.slotKey).filter(Boolean));
   const connectionDot = state.loading ? '' : state.error ? 'error' : 'live';
   const connectionText = state.loading ? 'Syncing' : state.error ? 'Reconnecting' : 'Live';
-  $('app').innerHTML = `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">FS</div><div><div class="eyebrow">Sleeper live desk</div><h1>Fantasy Score</h1></div></div><div class="top-actions"><div class="connection"><span class="dot ${connectionDot}"></span>${connectionText} · ${state.lastUpdated ? time(state.lastUpdated) : '-'}</div><button class="btn action-btn" id="refresh" aria-label="Refresh matchups"><span class="btn-text">Refresh</span><span class="btn-icon" aria-hidden="true">↻</span></button><button class="btn icon action-btn" id="open-settings" aria-label="Open settings"><span class="btn-text">Settings</span><span class="btn-icon" aria-hidden="true">⚙</span></button></div></header><section class="hero"><div><div class="eyebrow">${esc(state.nfl?.season || 'NFL')} season · Week ${esc(state.nfl?.week || '-')}</div><h1>Every league, one live desk.</h1><p class="hero-copy">${esc(state.user?.display_name || state.user?.username || '')} · ${visible.length} league${visible.length === 1 ? '' : 's'} included</p></div></section><div class="grid"><section class="stack"><div class="league-cards">${visible.length ? visible.map(l => renderLeagueCard(l, openLeagues, expandedSlots)).join('') : '<div class="matchup-card"><div class="empty">All leagues are excluded. Open settings to add one back.</div></div>'}</div></section><aside class="stack"><section><div class="eyebrow">Live ticker</div><h2 style="margin:4px 0 12px">Point swings</h2><div class="ticker">${renderTicker()}</div></section><section class="matchup-card"><div class="eyebrow">System status</div><h2 style="margin:5px 0 13px">Polling every ${pollLabel(settings.pollSeconds)}</h2><p class="matchup-meta">${settings.trackOpponent ? 'Tracking both lineups.' : 'Tracking your lineup.'}</p></section></aside></div></div>`;
+  $('app').innerHTML = `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">FS</div><div><div class="eyebrow">Sleeper live desk</div><h1>Fantasy Score</h1></div></div><div class="top-actions"><div class="connection"><span class="dot ${connectionDot}"></span>${connectionText} · ${state.lastUpdated ? time(state.lastUpdated) : '-'}</div><button class="btn action-btn" id="refresh" aria-label="Refresh matchups"><span class="btn-text">Refresh</span><span class="btn-icon" aria-hidden="true">↻</span></button><button class="btn icon action-btn" id="open-settings" aria-label="Open settings"><span class="btn-text">Settings</span><span class="btn-icon" aria-hidden="true">⚙</span></button></div></header><section class="hero"><div><div class="eyebrow">${esc(state.nfl?.season || 'NFL')} season · Week ${esc(state.nfl?.week || '-')}</div><h1>Every league, one live desk.</h1><p class="hero-copy">${esc(state.user?.display_name || state.user?.username || '')} · ${visible.length} league${visible.length === 1 ? '' : 's'} included</p></div></section><div class="grid"><section class="stack"><div class="league-cards">${visible.length ? visible.map(l => renderLeagueCard(l, openLeagues, expandedSlots)).join('') : '<div class="matchup-card"><div class="empty">All leagues are excluded. Open settings to add one back.</div></div>'}</div></section><aside class="stack"><section><div style="display:flex; justify-content:space-between; align-items:baseline"><div><div class="eyebrow">Live ticker</div><h2 style="margin:4px 0 12px">Point swings</h2></div>${state.ticker.length ? '<button id="clear-ticker" style="background:none; border:none; color:inherit; opacity:0.6; font-size:12px; cursor:pointer; padding:2px 4px;" title="Clear ticker">Clear</button>' : ''}</div><div class="ticker">${renderTicker()}</div></section><section class="matchup-card"><div class="eyebrow">System status</div><h2 style="margin:5px 0 13px">Polling every ${pollLabel(settings.pollSeconds)}</h2><p class="matchup-meta">${settings.trackOpponent ? 'Tracking both lineups.' : 'Tracking your lineup.'}</p></section></aside></div></div>`;
   renderLeagueExclusions();
   bindDashboard();
   bindSettings();
@@ -964,6 +982,11 @@ function dashboardView() {
 }
 function bindDashboard() {
   $('refresh')?.addEventListener('click', () => pollAllLeagues(true));
+  $('clear-ticker')?.addEventListener('click', () => {
+    state.ticker = [];
+    localStorage.removeItem('fantasy-score-ticker');
+    dashboardView();
+  });
   $('open-settings')?.addEventListener('click', () => document.body.classList.add('settings-open'));
   $('close-settings')?.addEventListener('click', () => document.body.classList.remove('settings-open'));
   $('backdrop')?.addEventListener('click', () => document.body.classList.remove('settings-open'));
@@ -1002,6 +1025,11 @@ async function pollAllLeagues(force = false) {
   state.error = '';
   try {
     const now = Date.now();
+    const elapsedSinceLastUpdate = now - (state.lastUpdated || 0);
+    // If cold start or resuming after a prolonged gap (> 2.5 minutes), treat this cycle as a catch-up sync:
+    // scores update to live immediately, but without spewing out-of-date past events into the ticker or voice.
+    const isCatchUp = !state.lastUpdated || elapsedSinceLastUpdate > 150000;
+
     if (!state.nfl || (now - (state.lastNflFetch || 0) > 600000)) {
       try {
         const latestNfl = await api('/state/nfl');
@@ -1013,8 +1041,10 @@ async function pollAllLeagues(force = false) {
             state.leagueData = {};
             state.previousPoints = {};
             state.previousStats = {};
+            state.ticker = [];
             localStorage.removeItem('fantasy-score-points');
             localStorage.removeItem('fantasy-score-stats-history');
+            localStorage.removeItem('fantasy-score-ticker');
           }
         }
       } catch (err) {
@@ -1043,7 +1073,7 @@ async function pollAllLeagues(force = false) {
     const leagues = includedLeagues();
     const pollResults = await Promise.all(leagues.map(async (league) => {
       await loadLeagueUsers(league);
-      const res = await poll(league, force);
+      const res = await poll(league, force, isCatchUp);
       return { league, res };
     }));
 
@@ -1071,7 +1101,7 @@ async function pollAllLeagues(force = false) {
       state.allMatchups = state.leagueData[state.selectedLeague.league_id].allMatchups;
     }
 
-    if (allChanges.length) {
+    if (!isCatchUp && allChanges.length) {
       const isDuplicate = (a, b) => (
         a.player === b.player &&
         fmt(a.playerTotal) === fmt(b.playerTotal) &&
@@ -1095,8 +1125,34 @@ async function pollAllLeagues(force = false) {
       localStorage.setItem('fantasy-score-ticker', JSON.stringify(state.ticker));
     }
 
+    // Auto-enrich recent ticker items when player box score stats become available
+    if (state.ticker && state.ticker.length) {
+      let enriched = false;
+      state.ticker.forEach(item => {
+        if (!item.play || item.play === 'Scoring play' || !item.stats || item.stats.startsWith('+') || item.stats === 'Live stats pending') {
+          const p = Object.values(state.players || {}).find(pl => pl.full_name === item.player);
+          if (p?.player_id) {
+            const currentStats = playerStats(p.player_id);
+            const isDef = p.position === 'DEF';
+            const desc = statSummary(currentStats, item.delta, isDef);
+            if (desc && !desc.startsWith('+') && desc !== 'Live stats pending' && desc !== 'No stats recorded') {
+              item.stats = desc;
+              enriched = true;
+            }
+          }
+        }
+      });
+      if (enriched) {
+        localStorage.setItem('fantasy-score-ticker', JSON.stringify(state.ticker));
+      }
+    }
+
     if (state.previousPoints) localStorage.setItem('fantasy-score-points', JSON.stringify(state.previousPoints));
     if (state.previousStats) localStorage.setItem('fantasy-score-stats-history', JSON.stringify(state.previousStats));
+
+    if (isCatchUp) {
+      console.info(`[Fantasy Score] Baselines synchronized after ${Math.round(elapsedSinceLastUpdate / 1000)}s gap (catch-up mode, no stale events generated).`);
+    }
 
     state.lastUpdated = Date.now();
     state.error = '';
