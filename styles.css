@@ -20,7 +20,7 @@ h1, h2, h3, p { margin: 0; } h1 { font-size: 20px; letter-spacing: -.03em; } h2 
 .btn:hover { border-color: var(--teal); color: var(--teal); } .btn.primary { background: var(--teal); color: #082724; border-color: var(--teal); font-weight: 800; }
 .btn.icon { padding: 9px 11px; font-size: 17px; }
 .connection { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); } .dot.live { background: var(--green); box-shadow: 0 0 0 4px rgba(104,230,168,.12); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); } .dot.live { background: var(--green); box-shadow: 0 0 0 4px rgba(104,230,168,.12); } .dot.error { background: #f87171; box-shadow: 0 0 0 4px rgba(248,113,113,.15); }
 .hero { display: grid; grid-template-columns: 1fr auto; gap: 24px; align-items: end; margin-bottom: 24px; }
 .hero h1 { margin-top: 5px; font-size: clamp(25px, 4vw, 40px); max-width: 720px; } .hero-copy { color: var(--muted); margin-top: 7px; }
 .league-control { min-width: min(100%, 330px); } label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; font-weight: 800; display: block; margin-bottom: 7px; }
