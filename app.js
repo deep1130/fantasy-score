@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.2.4';
+const APP_VERSION = 'v1.2.5';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 120, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: true, wake: false, excludedLeagues: [] };
@@ -359,10 +359,15 @@ async function poll(force = false) {
     const changes = [];
     [you, opponent].forEach(team => {
       if (!team.mine && !settings.trackOpponent) return;
+      const startersSet = new Set((team.starters || []).filter(id => id && id !== '0'));
       Object.entries(team.points).forEach(([id, points]) => {
         const key = `${state.selectedLeague.league_id}:${team.rosterId}:${id}`;
         const old = Number(previous[key] || 0);
         const delta = Number(points || 0) - old;
+        if (!startersSet.has(id)) {
+          previous[key] = points;
+          return;
+        }
         if (Object.prototype.hasOwnProperty.call(previous, key) && delta > 0) {
           team.deltas[id] = delta;
           const pStats = playerStats(id);
