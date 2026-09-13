@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.3.0';
+const APP_VERSION = 'v1.3.1';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
@@ -563,7 +563,48 @@ function renderTicker() {
     return `<div class="ticker-item"><i></i><div><strong>${esc(item.player)}</strong> gained ${fmt(item.delta)} points${item.playerTotal !== undefined ? ` (${fmt(item.playerTotal)} pts total)` : ''}<small>${playHtml}${statsHtml}${esc(item.team)} · Score ${fmt(item.you)} - ${fmt(item.opponent)}</small></div><time>${time(item.at)}</time></div>`;
   }).join('') : '<div class="empty">Score swings will appear here as players add points.</div>';
 }
-function bindSettings() { $('poll-interval').value = settings.pollSeconds; $('poll-value').textContent = pollLabel(settings.pollSeconds); $('track-opponent').checked = settings.trackOpponent; $('voice-enabled').checked = settings.voice; $('voice-volume').value = settings.volume; $('volume-value').textContent = Math.round(settings.volume * 100) + '%'; $('window-enabled').checked = settings.gameWindow; $('wake-enabled').checked = settings.wake; $('poll-interval').oninput = event => { settings.pollSeconds = Number(event.target.value); saveSettings(); bindSettings(); schedulePoll(); }; $('voice-volume').oninput = event => { settings.volume = Number(event.target.value); saveSettings(); bindSettings(); }; [['track-opponent','trackOpponent'], ['voice-enabled','voice'], ['window-enabled','gameWindow'], ['wake-enabled','wake']].forEach(([id, key]) => $(id).onchange = event => { settings[key] = event.target.checked; saveSettings(); if (key === 'wake') setWakeLock(settings.wake); }); $('reset-user').onclick = () => { localStorage.removeItem('fantasy-score-user'); state.user = null; state.leagues = []; document.body.classList.remove('settings-open'); setupView(); }; }
+function bindSettings() {
+  $('poll-interval').value = settings.pollSeconds;
+  $('poll-value').textContent = pollLabel(settings.pollSeconds);
+  document.querySelectorAll('.preset-btn[data-poll]').forEach(btn => {
+    btn.classList.toggle('active', Number(btn.dataset.poll) === settings.pollSeconds);
+    btn.onclick = () => {
+      settings.pollSeconds = Number(btn.dataset.poll);
+      saveSettings();
+      bindSettings();
+      schedulePoll();
+    };
+  });
+  $('track-opponent').checked = settings.trackOpponent;
+  $('voice-enabled').checked = settings.voice;
+  $('voice-volume').value = settings.volume;
+  $('volume-value').textContent = Math.round(settings.volume * 100) + '%';
+  $('window-enabled').checked = settings.gameWindow;
+  $('wake-enabled').checked = settings.wake;
+  $('poll-interval').oninput = event => {
+    settings.pollSeconds = Number(event.target.value);
+    saveSettings();
+    bindSettings();
+    schedulePoll();
+  };
+  $('voice-volume').oninput = event => {
+    settings.volume = Number(event.target.value);
+    saveSettings();
+    bindSettings();
+  };
+  [['track-opponent','trackOpponent'], ['voice-enabled','voice'], ['window-enabled','gameWindow'], ['wake-enabled','wake']].forEach(([id, key]) => $(id).onchange = event => {
+    settings[key] = event.target.checked;
+    saveSettings();
+    if (key === 'wake') setWakeLock(settings.wake);
+  });
+  $('reset-user').onclick = () => {
+    localStorage.removeItem('fantasy-score-user');
+    state.user = null;
+    state.leagues = [];
+    document.body.classList.remove('settings-open');
+    setupView();
+  };
+}
 
 async function loadLeagueUsers() {
   if (!state.selectedLeague) return;
