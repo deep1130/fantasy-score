@@ -1,10 +1,20 @@
-const APP_VERSION = 'v1.3.3';
+const APP_VERSION = 'v1.3.4';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 60, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: false, wake: false, excludedLeagues: [] };
 const pollLabel = sec => { const n = Number(sec) || 60; if (n < 60) return `${n}s`; if (n % 60 === 0) return `${n / 60}m`; return `${Math.floor(n / 60)}m ${n % 60}s`; };
-const state = { user: null, nfl: null, leagues: [], selectedLeague: null, matchup: null, allMatchups: [], leagueData: {}, players: {}, stats: {}, projections: {}, espnStats: {}, playerGames: {}, leagueUsers: [], leagueUsersCache: {}, ticker: [], lastUpdated: null, error: '', loading: false, wakeLock: null };
 const readStorage = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
+const fmt = value => Number(value || 0).toFixed(2).replace(/\.00$/, '');
+function dedupeTicker(items) {
+  const seen = new Set();
+  return (items || []).filter(item => {
+    const key = `${item.leagueId || ''}|${item.rosterId || ''}|${item.player}|${item.team}|${fmt(item.delta)}|${fmt(item.playerTotal)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+const state = { user: null, nfl: null, leagues: [], selectedLeague: null, matchup: null, allMatchups: [], leagueData: {}, players: {}, stats: {}, projections: {}, espnStats: {}, playerGames: {}, leagueUsers: [], leagueUsersCache: {}, ticker: dedupeTicker(readStorage('fantasy-score-ticker', readStorage('fantasy-score-dashboard-cache', {})?.ticker || [])), lastUpdated: null, error: '', loading: false, wakeLock: null };
 const savedSettings = readStorage('fantasy-score-settings', {});
 let settings = { ...defaults, ...savedSettings };
 let pollTimer;
@@ -36,7 +46,6 @@ async function ensurePlayersLoaded() {
   }
   return state.players;
 }
-const fmt = value => Number(value || 0).toFixed(2).replace(/\.00$/, '');
 const time = value => new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const inGameWindow = () => {
   if (!settings.gameWindow) return true;
@@ -85,6 +94,8 @@ function compactStatSummary(stats, points = null) {
   if (Number(stats.fgm)) parts.push(`${stats.fgm} FG`);
   if (Number(stats.sack)) parts.push(`${stats.sack} sk`);
   if (Number(stats.pass_int) || Number(stats.def_int)) parts.push(`${stats.pass_int || stats.def_int} INT`);
+  if (Number(stats.fum_lost)) parts.push(`${stats.fum_lost} FL`);
+  if (Number(stats.fum_rec)) parts.push(`${stats.fum_rec} FR`);
   if (parts.length) return parts.slice(0, 2).join(' · ');
   return Number(points) === 0 ? 'No stats' : '';
 }
@@ -104,11 +115,12 @@ function fullStatBreakdown(id, points = null) {
     const int = stats.pass_int ? `, ${stats.pass_int} INT` : '';
     lines.push(`<strong>Pass:</strong> ${att}${yds}${td}${int}`);
   }
-  if (stats.rush_att || stats.rush_yd || stats.rush_td) {
+  if (stats.rush_att || stats.rush_yd || stats.rush_td || stats.fum_lost) {
     const att = stats.rush_att ? `${stats.rush_att} car, ` : '';
-    const yds = `${stats.rush_yd || 0} yds`;
+    const yds = stats.rush_yd ? `${stats.rush_yd} yds` : stats.rush_att ? '0 yds' : '';
     const td = stats.rush_td ? `, ${stats.rush_td} TD` : '';
-    lines.push(`<strong>Rush:</strong> ${att}${yds}${td}`);
+    const fum = stats.fum_lost ? `, ${stats.fum_lost} fum lost` : '';
+    lines.push(`<strong>Rush:</strong> ${att}${yds}${td}${fum}`.replace(/^<strong>Rush:<\/strong> , /, '<strong>Rush:</strong> '));
   }
   if (stats.rec || stats.rec_yd || stats.rec_td || stats.rec_tgt) {
     const rec = stats.rec ? `${stats.rec} rec` : '';
@@ -122,11 +134,12 @@ function fullStatBreakdown(id, points = null) {
     const xp = stats.xpm !== undefined ? `, ${stats.xpm} XP` : '';
     lines.push(`<strong>Kick:</strong> ${fg}${xp}`);
   }
-  if (stats.sack || stats.def_int || stats.fum_rec || stats.def_td || stats.pts_allowed !== undefined) {
+  if (stats.sack || stats.def_int || stats.fum_rec || stats.def_td || stats.def_safety || stats.pts_allowed !== undefined) {
     const s = [];
     if (stats.sack) s.push(`${stats.sack} sk`);
     if (stats.def_int) s.push(`${stats.def_int} INT`);
     if (stats.fum_rec) s.push(`${stats.fum_rec} FR`);
+    if (stats.def_safety) s.push(`${stats.def_safety} safety`);
     if (stats.def_td) s.push(`${stats.def_td} TD`);
     if (stats.pts_allowed !== undefined) s.push(`${stats.pts_allowed} PA`);
     lines.push(`<strong>Def:</strong> ${s.join(', ')}`);
@@ -140,7 +153,7 @@ function fullStatBreakdown(id, points = null) {
 
 function playerSubText(id, points) {
   if (!id || id === '0') return 'No player set';
-  const player = state.players[id] || {};
+  const player = (state.players && state.players[id]) || {};
   const game = state.playerGames[normalizeTeam(player.team)];
   const status = game?.status || '';
   const stats = compactStatSummary(playerStats(id), points);
@@ -188,8 +201,8 @@ function renderMatchup(expandedSlots = new Set()) {
     const isMyEmpty = !myId || myId === '0';
     const isOppEmpty = !oppId || oppId === '0';
 
-    const myPlayer = isMyEmpty ? null : (state.players[myId] || {});
-    const oppPlayer = isOppEmpty ? null : (state.players[oppId] || {});
+    const myPlayer = (isMyEmpty || !state.players) ? null : (state.players[myId] || {});
+    const oppPlayer = (isOppEmpty || !state.players) ? null : (state.players[oppId] || {});
 
     const myName = formatPlayerName(myPlayer);
     const oppName = formatPlayerName(oppPlayer);
@@ -229,7 +242,7 @@ function renderMatchup(expandedSlots = new Set()) {
             </div>
             <div class="player-score-block">
               <span class="score-pts">${isMyEmpty ? '-' : fmt(myPoints)}</span>
-              ${myDelta > 0 ? `<span class="score-delta">+${fmt(myDelta)}</span>` : ''}
+              ${myDelta > 0 ? `<span class="score-delta">+${fmt(myDelta)}</span>` : myDelta < 0 ? `<span class="score-delta negative">${fmt(myDelta)}</span>` : ''}
             </div>
           </div>
 
@@ -240,7 +253,7 @@ function renderMatchup(expandedSlots = new Set()) {
           <div class="slot-col is-opponent ${isOppEmpty ? 'is-empty' : ''}">
             <div class="player-score-block">
               <span class="score-pts">${isOppEmpty ? '-' : fmt(oppPoints)}</span>
-              ${oppDelta > 0 ? `<span class="score-delta">+${fmt(oppDelta)}</span>` : ''}
+              ${oppDelta > 0 ? `<span class="score-delta">+${fmt(oppDelta)}</span>` : oppDelta < 0 ? `<span class="score-delta negative">${fmt(oppDelta)}</span>` : ''}
             </div>
             <div class="player-block">
               <div class="player-top">
@@ -391,8 +404,9 @@ function mergeEspnStatGroup(target, group) {
       if (group.name === 'interceptions' && label === 'INT' && Number.isFinite(number)) {
         stats.def_int = (stats.def_int || 0) + number;
       }
-      if (group.name === 'fumbles' && label === 'REC' && Number.isFinite(number)) {
-        stats.fum_rec = (stats.fum_rec || 0) + number;
+      if (group.name === 'fumbles') {
+        if (label === 'REC' && Number.isFinite(number)) stats.fum_rec = (stats.fum_rec || 0) + number;
+        if (label === 'LOST' && Number.isFinite(number)) stats.fum_lost = (stats.fum_lost || 0) + number;
       }
     });
     target[key] = stats;
@@ -451,6 +465,14 @@ async function loadEspnStats() {
             const int = Number(s.displayValue);
             if (Number.isFinite(int)) stats.def_int = int;
           }
+          if (s.name === 'fumblesRecovered') {
+            const fr = Number(s.displayValue);
+            if (Number.isFinite(fr)) stats.fum_rec = fr;
+          }
+          if (s.name === 'safeties') {
+            const saf = Number(s.displayValue);
+            if (Number.isFinite(saf)) stats.def_safety = saf;
+          }
         });
         result[`def|${teamAbbr}`] = stats;
       });
@@ -466,7 +488,7 @@ async function loadEspnStats() {
 function playerStats(id) {
   const sleeperStats = state.stats[id];
   if (sleeperStats && Object.keys(sleeperStats).length) return sleeperStats;
-  const player = state.players[id] || {};
+  const player = (state.players && state.players[id]) || {};
   const name = normalizeName(player.full_name);
   const team = normalizeTeam(player.team || id);
   if (player.position === 'DEF' || !name) {
@@ -493,15 +515,23 @@ function describeStatDelta(curr, prev, deltaPoints) {
     pass_yd: (curr.pass_yd || 0) - (prev.pass_yd || 0),
     pass_td: (curr.pass_td || 0) - (prev.pass_td || 0),
     pass_int: (curr.pass_int || 0) - (prev.pass_int || 0),
+    fum_lost: (curr.fum_lost || 0) - (prev.fum_lost || 0),
     fgm: (curr.fgm || 0) - (prev.fgm || 0),
     xpm: (curr.xpm || 0) - (prev.xpm || 0),
     sack: (curr.sack || 0) - (prev.sack || 0),
     def_int: (curr.def_int || 0) - (prev.def_int || 0),
     def_td: (curr.def_td || 0) - (prev.def_td || 0),
+    def_safety: (curr.def_safety || 0) - (prev.def_safety || 0),
     fum_rec: (curr.fum_rec || 0) - (prev.fum_rec || 0)
   };
 
   const phrases = [];
+  if (d.pass_int > 0) phrases.push(d.pass_int === 1 ? 'INT thrown' : `${d.pass_int} INTs thrown`);
+  if (d.fum_lost > 0) phrases.push(d.fum_lost === 1 ? 'fumble lost' : `${d.fum_lost} fumbles lost`);
+  if (d.def_int > 0) phrases.push(d.def_int === 1 ? '+1 INT takeaway' : `+${d.def_int} INT takeaways`);
+  if (d.fum_rec > 0) phrases.push(d.fum_rec === 1 ? '+1 fumble rec' : `+${d.fum_rec} fumble rec`);
+  if (d.def_safety > 0) phrases.push(d.def_safety === 1 ? '+1 safety' : `+${d.def_safety} safeties`);
+
   if (d.rush_td > 0) {
     phrases.push(d.rush_yd > 0 ? `${d.rush_yd}-yd rush TD` : `${d.rush_td} rush TD`);
   } else if (d.rush_yd > 0) {
@@ -529,21 +559,18 @@ function describeStatDelta(curr, prev, deltaPoints) {
     phrases.push(`+${d.pass_yd} pass yds`);
   }
 
-  if (d.pass_int > 0) phrases.push(`${d.pass_int} INT`);
   if (d.fgm > 0) phrases.push(`+${d.fgm} FG`);
   if (d.xpm > 0) phrases.push(`+${d.xpm} XP`);
   if (d.sack > 0) phrases.push(`+${d.sack} sack`);
-  if (d.def_int > 0) phrases.push(`+${d.def_int} INT`);
-  if (d.fum_rec > 0) phrases.push(`+${d.fum_rec} FR`);
   if (d.def_td > 0) phrases.push(`+${d.def_td} def TD`);
 
   return phrases.length ? phrases.join(', ') : null;
 }
-function playerGame(id) { const player = state.players[id] || {}; const game = state.playerGames[normalizeTeam(player.team)]; return game ? `${game.status} · ${game.context}` : 'Game info pending'; }
+function playerGame(id) { const player = (state.players && state.players[id]) || {}; const game = state.playerGames[normalizeTeam(player.team)]; return game ? `${game.status} · ${game.context}` : 'Game info pending'; }
 function matchupTeamLabel(team) { const row = state.allMatchups.find(item => item.mine); if (!row) return team.name; if (String(row.rosterA) === String(team.rosterId)) return row.a; if (String(row.rosterB) === String(team.rosterId)) return row.b; return team.name; }
 function projectionPoints(id) { const projection = state.projections[id] || {}; const value = projection.pts_ppr ?? projection.pts_half_ppr ?? projection.pts_std ?? projection.fantasy_points ?? projection.projected_points; return Number.isFinite(Number(value)) ? Number(value) : null; }
 function playerStatus(id, points) { const summary = statSummary(playerStats(id), points); const projection = projectionPoints(id); return summary !== 'No stats recorded' ? summary : projection === null ? summary : `Proj ${fmt(projection)}`; }
-function projectedTotal(team) { let hasProjection = false; const total = team.starters.reduce((sum, id) => { const actual = Number(team.points[id] || 0); const projection = projectionPoints(id); const status = state.playerGames[normalizeTeam((state.players[id] || {}).team)]?.status || ''; if (projection === null) return sum + actual; hasProjection = true; return sum + (/final|post/i.test(status) ? actual : Math.max(actual, projection)); }, 0); return hasProjection ? total : null; }
+function projectedTotal(team) { let hasProjection = false; const total = team.starters.reduce((sum, id) => { const actual = Number(team.points[id] || 0); const projection = projectionPoints(id); const status = state.playerGames[normalizeTeam(((state.players && state.players[id]) || {}).team)]?.status || ''; if (projection === null) return sum + actual; hasProjection = true; return sum + (/final|post/i.test(status) ? actual : Math.max(actual, projection)); }, 0); return hasProjection ? total : null; }
 function statSummary(stats, points = null) {
   const parts = [];
   if (Number(stats?.pass_td || 0)) parts.push(`${stats.pass_td} pass TD`);
@@ -555,24 +582,25 @@ function statSummary(stats, points = null) {
   if (Number(stats?.rec || 0)) parts.push(`${stats.rec} rec`);
   if (Number(stats?.rec_yd || 0)) parts.push(`${stats.rec_yd} rec yds`);
   if (Number(stats?.pass_yd || 0)) parts.push(`${stats.pass_yd} pass yds`);
+  if (Number(stats?.pass_int || 0)) parts.push(`${stats.pass_int} INT`);
+  if (Number(stats?.fum_lost || 0)) parts.push(`${stats.fum_lost} fum lost`);
+  if (Number(stats?.def_int || 0)) parts.push(`${stats.def_int} INT`);
+  if (Number(stats?.fum_rec || 0)) parts.push(`${stats.fum_rec} FR`);
+  if (Number(stats?.sack || 0)) parts.push(`${stats.sack} sk`);
+  if (Number(stats?.def_safety || 0)) parts.push(`${stats.def_safety} safety`);
   if (parts.length) return parts.join(' · ');
-  if (points !== null && Number(points) > 0) return `+${fmt(points)} pts`;
+  if (points !== null && Number(points) !== 0) return `${Number(points) > 0 ? '+' : ''}${fmt(points)} pts`;
   return Number(points) === 0 && points !== null ? 'No stats recorded' : 'Live stats pending';
-}
-function dedupeTicker(items) {
-  const seen = new Set();
-  return (items || []).filter(item => {
-    const key = `${item.player}|${item.team}|${fmt(item.delta)}|${fmt(item.playerTotal)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }
 function renderTicker() {
   return state.ticker.length ? state.ticker.map(item => {
     const playHtml = item.play ? `<span class="ticker-play">${esc(item.play)}</span> · ` : '';
-    const statsHtml = item.stats && item.stats !== 'No stats recorded' && !item.stats.startsWith('+') ? `${esc(item.stats)} · ` : '';
-    return `<div class="ticker-item"><i></i><div><strong>${esc(item.player)}</strong> gained ${fmt(item.delta)} points${item.playerTotal !== undefined ? ` (${fmt(item.playerTotal)} pts total)` : ''}<small>${playHtml}${statsHtml}${esc(item.team)} · Score ${fmt(item.you)} - ${fmt(item.opponent)}</small></div><time>${time(item.at)}</time></div>`;
+    const statsHtml = item.stats && item.stats !== 'No stats recorded' && !item.stats.startsWith('+') && !item.stats.startsWith('-') ? `${esc(item.stats)} · ` : '';
+    const leagueHtml = item.leagueName ? `<span class="ticker-league">${esc(item.leagueName)}</span> · ` : '';
+    const isLoss = item.delta < 0;
+    const actionHtml = isLoss ? `lost <span class="delta-loss">${fmt(Math.abs(item.delta))}</span> points` : `gained ${fmt(item.delta)} points`;
+    const itemClass = isLoss ? 'ticker-item negative' : 'ticker-item';
+    return `<div class="${itemClass}"><i></i><div><strong>${esc(item.player)}</strong> ${actionHtml}${item.playerTotal !== undefined ? ` (${fmt(item.playerTotal)} pts total)` : ''}<small>${playHtml}${statsHtml}${leagueHtml}${esc(item.team)} · Score ${fmt(item.you)} - ${fmt(item.opponent)}</small></div><time>${time(item.at)}</time></div>`;
   }).join('') : '<div class="empty">Score swings will appear here as players add points.</div>';
 }
 function bindSettings() {
@@ -679,14 +707,17 @@ async function poll(force = false) {
         previous[key] = points;
         return;
       }
-      if (Object.prototype.hasOwnProperty.call(previous, key) && delta > 0) {
+      if (Object.prototype.hasOwnProperty.call(previous, key) && Math.abs(delta) > 0.001) {
         team.deltas[id] = delta;
         const pStats = playerStats(id);
         const prevPStats = previousStats[key];
-        const play = describeStatDelta(pStats, prevPStats, delta);
+        const play = describeStatDelta(pStats, prevPStats, delta) || (delta < 0 ? 'Turnover / point loss' : null);
         const summary = statSummary(pStats, delta);
         changes.push({
-          player: state.players[id]?.full_name || id,
+          player: (state.players && state.players[id]?.full_name) || id,
+          leagueId: state.selectedLeague?.league_id || '',
+          leagueName: state.selectedLeague?.name || '',
+          rosterId: team.rosterId,
           play,
           stats: summary,
           team: team.name,
@@ -711,6 +742,7 @@ async function poll(force = false) {
   console.info(`[Fantasy Score] Matchup summary: You ${fmt(you.total)} - Opponent ${fmt(opponent.total)}`);
   if (changes.length) {
     const isDuplicate = (a, b) => (
+      (!a.leagueId || !b.leagueId || a.leagueId === b.leagueId) &&
       a.player === b.player &&
       a.team === b.team &&
       fmt(a.playerTotal) === fmt(b.playerTotal) &&
@@ -718,11 +750,13 @@ async function poll(force = false) {
     );
     const uniqueChanges = changes.filter(c => !state.ticker.some(existing => isDuplicate(c, existing)));
     if (uniqueChanges.length) {
-      state.ticker = dedupeTicker([...uniqueChanges.reverse(), ...state.ticker]).slice(0, 30);
+      state.ticker = dedupeTicker([...uniqueChanges.reverse(), ...state.ticker]).slice(0, 50);
+      localStorage.setItem('fantasy-score-ticker', JSON.stringify(state.ticker));
       announce(uniqueChanges);
     }
   } else {
     state.ticker = dedupeTicker(state.ticker);
+    localStorage.setItem('fantasy-score-ticker', JSON.stringify(state.ticker));
   }
 }
 
@@ -750,13 +784,14 @@ function playRawAudio(raw) { if (!raw) return Promise.resolve(); try { const Aud
 async function speakText(text) { try { const tts = await getKokoroTts(); const raw = await tts.generate(text, { voice: settings.kokoroVoice, speed: settings.voiceRate }); await playRawAudio(raw); } catch (error) { console.warn('Kokoro voice announcement skipped.', error); } }
 function announce(changes) {
   if (!settings.voice) return;
-  const audible = changes.filter(item => item.delta >= Number(settings.voiceMinPoints || 0));
+  const audible = changes.filter(item => Math.abs(item.delta) >= Number(settings.voiceMinPoints || 0));
   if (!audible.length) return;
   const item = audible[0];
-  const statText = item.play ? `, ${item.play},` : (item.stats && !/no stats/i.test(item.stats) && !item.stats.startsWith('+') ? `, ${item.stats},` : '');
+  const statText = item.play ? `, ${item.play},` : (item.stats && !/no stats/i.test(item.stats) && !item.stats.startsWith('+') && !item.stats.startsWith('-') ? `, ${item.stats},` : '');
   const teamContext = item.team ? ` for ${item.team}` : '';
   const totalText = item.playerTotal !== undefined ? `, now at ${fmt(item.playerTotal)} points` : '';
-  speakText(`${item.player}${statText} gained ${fmt(item.delta)} points${teamContext}${totalText}. Current score: You ${fmt(item.you)}, Opponent ${fmt(item.opponent)}.`);
+  const actionText = item.delta < 0 ? `lost ${fmt(Math.abs(item.delta))} points` : `gained ${fmt(item.delta)} points`;
+  speakText(`${item.player}${statText} ${actionText}${teamContext}${totalText}. Current score: You ${fmt(item.you)}, Opponent ${fmt(item.opponent)}.`);
 }
 function schedulePoll() { clearTimeout(pollTimer); pollTimer = setTimeout(() => pollAllLeagues(), settings.pollSeconds * 1000); }
 async function setWakeLock(enabled) { if (!navigator.wakeLock) return; try { if (enabled && !state.wakeLock) state.wakeLock = await navigator.wakeLock.request('screen'); if (!enabled && state.wakeLock) { await state.wakeLock.release(); state.wakeLock = null; } } catch (error) { console.warn('Wake lock unavailable', error); } }
@@ -773,7 +808,7 @@ function renderLeagueCard(league, openLeagues = new Set(), expandedSlots = new S
   state.selectedLeague = league;
   state.matchup = snapshot.matchup;
   state.allMatchups = snapshot.allMatchups;
-  state.players = snapshot.players;
+  state.players = snapshot.players || state.players || {};
   state.stats = snapshot.stats;
   state.projections = snapshot.projections || {};
   state.espnStats = snapshot.espnStats || {};
@@ -901,7 +936,7 @@ function saveDashboardCache() {
         ...(ld.matchup?.opponent?.starters || [])
       ];
       starters.forEach(id => {
-        if (id && state.players[id]) rosterPlayers[id] = state.players[id];
+        if (id && state.players && state.players[id]) rosterPlayers[id] = state.players[id];
       });
     });
 
@@ -914,7 +949,8 @@ function saveDashboardCache() {
         projections: data.projections,
         espnStats: data.espnStats,
         playerGames: data.playerGames,
-        leagueUsers: data.leagueUsers
+        leagueUsers: data.leagueUsers,
+        players: rosterPlayers
       };
     });
 
@@ -928,6 +964,7 @@ function saveDashboardCache() {
       ticker: dedupeTicker(state.ticker),
       lastUpdated: state.lastUpdated
     };
+    localStorage.setItem('fantasy-score-ticker', JSON.stringify(payload.ticker));
     localStorage.setItem('fantasy-score-dashboard-cache', JSON.stringify(payload));
   } catch (e) {
     console.warn('Could not cache dashboard data', e);
@@ -990,6 +1027,8 @@ window.addEventListener('focus', () => {
 });
 const savedUser = localStorage.getItem('fantasy-score-user');
 const cachedDashboard = readStorage('fantasy-score-dashboard-cache', null);
+const cachedTicker = readStorage('fantasy-score-ticker', cachedDashboard?.ticker || []);
+state.ticker = dedupeTicker(cachedTicker);
 if (savedUser) {
   if (cachedDashboard && cachedDashboard.user?.username?.toLowerCase() === savedUser.toLowerCase()) {
     state.user = cachedDashboard.user;
@@ -997,8 +1036,7 @@ if (savedUser) {
     state.leagues = cachedDashboard.leagues || [];
     state.selectedLeague = cachedDashboard.selectedLeague || state.leagues[0];
     state.leagueData = cachedDashboard.leagueData || {};
-    state.players = cachedDashboard.rosterPlayers || {};
-    state.ticker = dedupeTicker(cachedDashboard.ticker || []);
+    state.players = cachedDashboard.rosterPlayers || state.players || {};
     state.lastUpdated = cachedDashboard.lastUpdated;
     state.loading = true;
     dashboardView();
