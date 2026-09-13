@@ -9,7 +9,9 @@ function dedupeTicker(items) {
   const seen = new Set();
   return (items || []).filter(item => {
     if (item.play === 'Turnover / point loss') return false;
-    const key = `${item.leagueId || ''}|${item.rosterId || ''}|${item.player}|${item.team}|${fmt(item.delta)}|${fmt(item.playerTotal)}`;
+    // Cross-league deduplication: if the same player has the exact same delta and total within 2 minutes, keep only 1 entry
+    const timeBucket = Math.floor(Number(item.at || 0) / 120000);
+    const key = `${item.player}|${fmt(item.delta)}|${fmt(item.playerTotal)}|${timeBucket}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -785,6 +787,28 @@ async function poll(force = false) {
           team.points[id] = old;
           return;
         }
+        const hasPlay = isDef || Boolean(
+          (pStats?.rush_att || 0) > (prevPStats?.rush_att || 0) ||
+          (pStats?.rec || 0) > (prevPStats?.rec || 0) ||
+          (pStats?.pass_att || 0) > (prevPStats?.pass_att || 0) ||
+          (pStats?.pass_cmp || 0) > (prevPStats?.pass_cmp || 0) ||
+          (pStats?.rush_td || 0) > (prevPStats?.rush_td || 0) ||
+          (pStats?.rec_td || 0) > (prevPStats?.rec_td || 0) ||
+          (pStats?.pass_td || 0) > (prevPStats?.pass_td || 0) ||
+          (pStats?.fgm || 0) > (prevPStats?.fgm || 0) ||
+          (pStats?.xpm || 0) > (prevPStats?.xpm || 0) ||
+          (pStats?.pass_int || 0) > (prevPStats?.pass_int || 0) ||
+          (pStats?.fum_lost || 0) > (prevPStats?.fum_lost || 0) ||
+          (pStats?.sack || 0) > (prevPStats?.sack || 0)
+        );
+
+        // Ignore micro-adjustments (< 0.40 pts) if no actual play occurred (e.g. official spot adjustments)
+        if (Math.abs(delta) < 0.40 && !hasPlay && prevPStats && Object.keys(prevPStats).length > 0) {
+          previous[key] = points;
+          previousStats[key] = { ...(pStats || {}) };
+          return;
+        }
+
         team.deltas[id] = delta;
         const play = describeStatDelta(pStats, prevPStats, delta, isDef) ||
           (delta < 0
@@ -826,11 +850,10 @@ async function poll(force = false) {
   console.info(`[Fantasy Score] Matchup summary: You ${fmt(you.total)} - Opponent ${fmt(opponent.total)}`);
   if (changes.length) {
     const isDuplicate = (a, b) => (
-      (!a.leagueId || !b.leagueId || a.leagueId === b.leagueId) &&
       a.player === b.player &&
-      a.team === b.team &&
       fmt(a.playerTotal) === fmt(b.playerTotal) &&
-      fmt(a.delta) === fmt(b.delta)
+      fmt(a.delta) === fmt(b.delta) &&
+      Math.abs((a.at || 0) - (b.at || 0)) < 120000
     );
     const uniqueChanges = changes.filter(c => !state.ticker.some(existing => isDuplicate(c, existing)));
     if (uniqueChanges.length) {
