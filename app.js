@@ -1,4 +1,4 @@
-const APP_VERSION = 'v1.2.1';
+const APP_VERSION = 'v1.2.2';
 const API = 'https://api.sleeper.app/v1';
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
 const defaults = { pollSeconds: 120, trackOpponent: true, voice: false, volume: .8, kokoroVoice: 'bf_emma', voiceRate: 1, voiceMinPoints: 1, gameWindow: true, wake: false, excludedLeagues: [] };
@@ -21,7 +21,168 @@ function setupView() {
   $('username-form').addEventListener('submit', event => { event.preventDefault(); connect($('username').value.trim()); });
 }
 function renderAllMatchups() { if (!state.allMatchups.length) return '<div class="empty">No league matchups available for this week.</div>'; return `<div class="league-list">${state.allMatchups.map(item => `<div class="matchup-row ${item.mine ? 'active' : ''}"><div class="row-top"><span>${item.mine ? 'YOUR MATCHUP' : 'MATCHUP ' + item.id}</span><span>${item.count} rosters</span></div><div class="row-score"><span>${esc(item.a)}</span><span>${fmt(item.scoreA)} · ${fmt(item.scoreB)}</span><span>${esc(item.b)}</span></div></div>`).join('')}</div>`; }
-function renderMatchup() { const team = state.matchup.you; const opponent = state.matchup.opponent; const teamName = matchupTeamLabel(team); const opponentName = matchupTeamLabel(opponent); const teamProjection = projectedTotal(team); const opponentProjection = projectedTotal(opponent); const starters = (side, isMine) => `<div class="starter-column ${isMine ? 'is-mine' : 'is-opponent'}"><h3>${esc(side === team ? teamName : opponentName)} ${side.mine ? '· You' : ''}</h3>${side.starters.map((id, index) => { const isPlaceholder = !id || id === '0'; const player = isPlaceholder ? {} : (state.players[id] || {}); const counterpartId = (side === team ? opponent.starters : team.starters)?.[index]; const counterpartPlayer = counterpartId && counterpartId !== '0' ? (state.players[counterpartId] || {}) : {}; const posLabel = player.position || counterpartPlayer.position || '-'; const delta = isPlaceholder ? 0 : (side.deltas[id] || 0); const displayName = isPlaceholder ? 'Empty slot' : (player.full_name || id); const teamLabel = isPlaceholder ? '' : ` · ${esc(player.team || 'FA')}`; const gameText = isPlaceholder ? 'No player set' : playerGame(id); const statusText = isPlaceholder ? '-' : playerStatus(id, side.points[id]); return `<div class="starter ${isPlaceholder ? 'is-empty' : ''}"><span class="pos">${esc(posLabel)}</span><div class="starter-info"><div class="player-name">${esc(displayName)}<span class="player-team-inline">${teamLabel}</span></div><div class="player-game">${esc(gameText)}</div><div class="player-stats">${esc(statusText)}</div></div><div class="player-points">${fmt(side.points[id])}${delta > 0 ? `<span class="delta">+${fmt(delta)}</span>` : ''}</div></div>`; }).join('') || '<div class="empty">No starters listed.</div>'}</div>`; return `<section class="matchup-card"><div class="matchup-head"><div><div class="eyebrow">Head-to-head</div><h2>${esc(state.selectedLeague.name)}</h2><div class="matchup-meta">${esc(teamName)} vs ${esc(opponentName)}</div></div><div class="week-badge">WEEK ${esc(state.nfl.week)}</div></div><div class="scoreboard"><div class="score-team you"><span>${esc(teamName)}</span><b class="score">${fmt(team.total)}</b>${teamProjection === null ? '' : `<small class="score-projected">Est. ${fmt(teamProjection)}</small>`}</div><span class="score-dash">-</span><div class="score-team opponent"><span>${esc(opponentName)}</span><b class="score">${fmt(opponent.total)}</b>${opponentProjection === null ? '' : `<small class="score-projected">Est. ${fmt(opponentProjection)}</small>`}</div></div><div class="starter-columns">${starters(team, true)}${starters(opponent, false)}</div></section>`; }
+function formatPlayerName(player) {
+  if (!player || !player.full_name) return { full: 'Empty slot', short: 'Empty' };
+  const full = player.full_name;
+  const first = player.first_name || '';
+  const last = player.last_name || '';
+  const short = (first && last) ? `${first[0]}. ${last}` : full;
+  return { full, short };
+}
+
+function playerSubText(id, points) {
+  if (!id || id === '0') return 'No player set';
+  const player = state.players[id] || {};
+  const game = state.playerGames[normalizeTeam(player.team)];
+  const status = game?.status || '';
+  const stats = statSummary(playerStats(id), points);
+  if (/final|post/i.test(status)) {
+    return stats !== 'No stats recorded' ? `Final · ${stats}` : `Final`;
+  }
+  if (/in|qtr|half|live|\d+:\d+/i.test(status)) {
+    return stats !== 'No stats recorded' ? `${status} · ${stats}` : status;
+  }
+  const proj = projectionPoints(id);
+  if (proj !== null && Number(points || 0) === 0) {
+    return `${game?.status || 'Scheduled'} · Proj ${fmt(proj)}`;
+  }
+  return game?.status || (proj !== null ? `Proj ${fmt(proj)}` : '-');
+}
+
+function getSlotPosition(index, myPlayer, oppPlayer) {
+  const positions = state.selectedLeague?.roster_positions ? state.selectedLeague.roster_positions.filter(p => p !== 'BN') : [];
+  if (positions[index]) {
+    const raw = positions[index];
+    if (raw === 'SUPER_FLEX') return 'SF';
+    if (raw === 'FLEX') return 'FLX';
+    return raw;
+  }
+  if (myPlayer?.position && oppPlayer?.position && myPlayer.position !== oppPlayer.position) {
+    return 'FLX';
+  }
+  return myPlayer?.position || oppPlayer?.position || 'FLX';
+}
+
+function renderMatchup() {
+  const team = state.matchup.you;
+  const opponent = state.matchup.opponent;
+  const teamName = matchupTeamLabel(team);
+  const opponentName = matchupTeamLabel(opponent);
+  const teamProjection = projectedTotal(team);
+  const opponentProjection = projectedTotal(opponent);
+
+  const totalSlots = Math.max(team.starters?.length || 0, opponent.starters?.length || 0);
+  const slots = [];
+
+  for (let i = 0; i < totalSlots; i++) {
+    const myId = team.starters?.[i];
+    const oppId = opponent.starters?.[i];
+    const isMyEmpty = !myId || myId === '0';
+    const isOppEmpty = !oppId || oppId === '0';
+
+    const myPlayer = isMyEmpty ? null : (state.players[myId] || {});
+    const oppPlayer = isOppEmpty ? null : (state.players[oppId] || {});
+
+    const myName = formatPlayerName(myPlayer);
+    const oppName = formatPlayerName(oppPlayer);
+
+    const pos = getSlotPosition(i, myPlayer, oppPlayer);
+    const posClass = `pos-${pos.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+
+    const myPoints = isMyEmpty ? 0 : Number(team.points[myId] || 0);
+    const oppPoints = isOppEmpty ? 0 : Number(opponent.points[oppId] || 0);
+
+    const myDelta = isMyEmpty ? 0 : (team.deltas[myId] || 0);
+    const oppDelta = isOppEmpty ? 0 : (opponent.deltas[oppId] || 0);
+
+    const mySub = isMyEmpty ? 'Empty slot' : playerSubText(myId, myPoints);
+    const oppSub = isOppEmpty ? 'Empty slot' : playerSubText(oppId, oppPoints);
+
+    slots.push(`
+      <div class="slot-row">
+        <div class="slot-col is-mine ${isMyEmpty ? 'is-empty' : ''}">
+          <div class="player-block">
+            <div class="player-top">
+              <span class="player-name">
+                <span class="name-full">${esc(myName.full)}</span>
+                <span class="name-short">${esc(myName.short)}</span>
+              </span>
+              ${myPlayer?.team ? `<span class="team-tag">${esc(myPlayer.team)}</span>` : ''}
+            </div>
+            <div class="player-sub">${esc(mySub)}</div>
+          </div>
+          <div class="player-score-block">
+            <span class="score-pts">${isMyEmpty ? '-' : fmt(myPoints)}</span>
+            ${myDelta > 0 ? `<span class="score-delta">+${fmt(myDelta)}</span>` : ''}
+          </div>
+        </div>
+
+        <div class="slot-pos">
+          <span class="pos-badge ${posClass}">${esc(pos)}</span>
+        </div>
+
+        <div class="slot-col is-opponent ${isOppEmpty ? 'is-empty' : ''}">
+          <div class="player-score-block">
+            <span class="score-pts">${isOppEmpty ? '-' : fmt(oppPoints)}</span>
+            ${oppDelta > 0 ? `<span class="score-delta">+${fmt(oppDelta)}</span>` : ''}
+          </div>
+          <div class="player-block">
+            <div class="player-top">
+              ${oppPlayer?.team ? `<span class="team-tag">${esc(oppPlayer.team)}</span>` : ''}
+              <span class="player-name">
+                <span class="name-full">${esc(oppName.full)}</span>
+                <span class="name-short">${esc(oppName.short)}</span>
+              </span>
+            </div>
+            <div class="player-sub">${esc(oppSub)}</div>
+          </div>
+        </div>
+      </div>
+    `);
+  }
+
+  return `
+    <section class="matchup-card">
+      <div class="matchup-head">
+        <div>
+          <div class="eyebrow">${esc(state.selectedLeague?.name || 'Matchup')}</div>
+          <h2>Head-to-head</h2>
+        </div>
+        <div class="week-badge">WEEK ${esc(state.nfl?.week || '')}</div>
+      </div>
+
+      <div class="scoreboard">
+        <div class="score-team you">
+          <div class="team-label">${esc(teamName)} <span class="badge-you">YOU</span></div>
+          <div class="score">${fmt(team.total)}</div>
+          ${teamProjection === null ? '' : `<div class="score-projected">Est. ${fmt(teamProjection)}</div>`}
+        </div>
+        <div class="score-vs-box">
+          <span class="score-vs">VS</span>
+          <span class="score-status-pill">WK ${esc(state.nfl?.week || '')}</span>
+        </div>
+        <div class="score-team opponent">
+          <div class="team-label">${esc(opponentName)}</div>
+          <div class="score">${fmt(opponent.total)}</div>
+          ${opponentProjection === null ? '' : `<div class="score-projected">Est. ${fmt(opponentProjection)}</div>`}
+        </div>
+      </div>
+
+      <div class="matchup-slots">
+        <div class="slots-header">
+          <div class="header-team is-mine">
+            <span class="header-team-name">${esc(teamName)}</span>
+          </div>
+          <div class="header-pos">POS</div>
+          <div class="header-team is-opponent">
+            <span class="header-team-name">${esc(opponentName)}</span>
+          </div>
+        </div>
+        ${slots.join('') || '<div class="empty">No starters listed.</div>'}
+      </div>
+    </section>
+  `;
+}
 const normalizeName = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const normalizeTeam = value => ({ SFO: 'SF', GBP: 'GB', KCC: 'KC', LAC: 'LAC', LAR: 'LAR', JAX: 'JAX', NOS: 'NO', TBB: 'TB', NEP: 'NE', SDO: 'SD' }[String(value || '').toUpperCase()] || String(value || '').toUpperCase());
 function mergeEspnStatGroup(target, group) { const labels = (group.labels || []).map(label => String(label).toUpperCase()); (group.athletes || []).forEach(entry => { const key = `${normalizeName(entry.athlete?.fullName || entry.athlete?.displayName)}|${normalizeTeam(group.team?.abbreviation)}`; const stats = target[key] || {}; (entry.stats || []).forEach((value, index) => { const label = labels[index]; const number = Number(String(value).replace(/[^0-9.-]/g, '')); if (!Number.isFinite(number)) return; if (group.name === 'rushing' && label === 'YDS') stats.rush_yd = number; if (group.name === 'rushing' && label === 'TD') stats.rush_td = number; if (group.name === 'receiving' && label === 'REC') stats.rec = number; if (group.name === 'receiving' && label === 'YDS') stats.rec_yd = number; if (group.name === 'receiving' && label === 'TD') stats.rec_td = number; if (group.name === 'passing' && label === 'YDS') stats.pass_yd = number; if (group.name === 'passing' && label === 'TD') stats.pass_td = number; }); target[key] = stats; }); }
@@ -53,7 +214,7 @@ function bindVoiceThreshold() { const input = $('voice-min-points'); const value
 function bindVoiceSettings() { bindVoiceThreshold(); const kokoroVoice = $('kokoro-voice'); const rate = $('voice-rate'); const test = $('voice-test'); if (kokoroVoice) { kokoroVoice.value = settings.kokoroVoice; kokoroVoice.onchange = event => { settings.kokoroVoice = event.target.value; saveSettings(); }; } if (rate) { rate.value = settings.voiceRate; $('voice-rate-value').textContent = Number(settings.voiceRate).toFixed(1) + 'x'; rate.oninput = event => { settings.voiceRate = Number(event.target.value); $('voice-rate-value').textContent = settings.voiceRate.toFixed(1) + 'x'; saveSettings(); }; } if (test) test.onclick = announceTestVoice; }
 async function announceTestVoice() { const btn = $('voice-test'); const original = btn?.textContent || 'Test selected voice'; if (btn) { btn.disabled = true; btn.textContent = 'Loading Kokoro...'; } try { const tts = await getKokoroTts(); if (btn) btn.textContent = 'Generating speech...'; const raw = await tts.generate('Voice test.', { voice: settings.kokoroVoice, speed: settings.voiceRate }); if (btn) btn.textContent = 'Playing...'; await playRawAudio(raw); } catch (error) { console.warn('Kokoro voice test failed:', error); if (btn) btn.textContent = 'Voice error'; await new Promise(r => setTimeout(r, 2000)); } finally { if (btn) { btn.disabled = false; btn.textContent = original; } } }
 function renderLeagueCard(league) { const snapshot = state.leagueData[league.league_id]; if (!snapshot) return `<details class="league-card"><summary><div class="league-summary"><div class="league-summary-copy"><strong>${esc(league.name)}</strong><small>Waiting for first sync...</small></div></div></summary><div class="panel-content"><div class="empty">${state.loading ? 'Loading league details...' : 'No matchup data available.'}</div></div></details>`; const previous = { selectedLeague: state.selectedLeague, matchup: state.matchup, allMatchups: state.allMatchups, players: state.players, stats: state.stats, projections: state.projections, espnStats: state.espnStats, playerGames: state.playerGames, leagueUsers: state.leagueUsers }; state.selectedLeague = league; state.matchup = snapshot.matchup; state.allMatchups = snapshot.allMatchups; state.players = snapshot.players; state.stats = snapshot.stats; state.projections = snapshot.projections || {}; state.espnStats = snapshot.espnStats || {}; state.playerGames = snapshot.playerGames || {}; state.leagueUsers = snapshot.leagueUsers; const matchup = snapshot.matchup; const score = matchup ? `${fmt(matchup.you.total)} - ${fmt(matchup.opponent.total)}` : 'No matchup'; const detail = matchup ? renderMatchup() : '<div class="empty">No matchup found for this week.</div>'; const pulse = renderAllMatchups(); const teamSummary = matchup ? `${matchupTeamLabel(matchup.you)} vs ${matchupTeamLabel(matchup.opponent)}` : 'No matchup data'; Object.assign(state, previous); return `<details class="league-card" ${league.league_id === state.selectedLeague?.league_id ? 'open' : ''}><summary><div class="league-summary"><div class="league-summary-copy"><strong>${esc(league.name)}</strong><small>${esc(teamSummary)}</small></div><div class="league-summary-score"><strong>${score}</strong><small>Week ${esc(state.nfl?.week || '-')}</small></div></div></summary><div class="panel-content">${detail}<details><summary><span><span class="eyebrow">League pulse</span><br><strong>All matchups</strong></span></summary><div class="panel-content">${pulse}</div></details></div></details>`; }
-function dashboardView() { const visible = includedLeagues(); $('app').innerHTML = `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">FS</div><div><div class="eyebrow">Sleeper live desk</div><h1>Fantasy Score</h1></div></div><div class="top-actions"><div class="connection"><span class="dot ${state.loading ? '' : 'live'}"></span>${state.loading ? 'Syncing' : 'Live'} · ${state.lastUpdated ? time(state.lastUpdated) : '-'}</div><button class="btn" id="refresh">Refresh</button><button class="btn icon" id="open-settings" aria-label="Open settings">[ ]</button></div></header><section class="hero"><div><div class="eyebrow">${esc(state.nfl?.season || 'NFL')} season · Week ${esc(state.nfl?.week || '-')}</div><h1>Every league, one live desk.</h1><p class="hero-copy">${esc(state.user?.display_name || state.user?.username || '')} · ${visible.length} league${visible.length === 1 ? '' : 's'} included</p></div></section><div class="grid"><section class="stack"><div class="league-cards">${visible.length ? visible.map(renderLeagueCard).join('') : '<div class="matchup-card"><div class="empty">All leagues are excluded. Open settings to add one back.</div></div>'}</div></section><aside class="stack"><section><div class="eyebrow">Live ticker</div><h2 style="margin:4px 0 12px">Point swings</h2><div class="ticker">${renderTicker()}</div></section><section class="matchup-card"><div class="eyebrow">System status</div><h2 style="margin:5px 0 13px">Polling every ${settings.pollSeconds}s</h2><p class="matchup-meta">${settings.trackOpponent ? 'Tracking both lineups.' : 'Tracking your lineup.'}</p></section></aside></div></div>`; renderLeagueExclusions(); bindDashboard(); bindSettings(); bindLeagueExclusions(); }
+function dashboardView() { const visible = includedLeagues(); $('app').innerHTML = `<div class="app-shell"><header class="topbar"><div class="brand"><div class="brand-mark">FS</div><div><div class="eyebrow">Sleeper live desk</div><h1>Fantasy Score</h1></div></div><div class="top-actions"><div class="connection"><span class="dot ${state.loading ? '' : 'live'}"></span>${state.loading ? 'Syncing' : 'Live'} · ${state.lastUpdated ? time(state.lastUpdated) : '-'}</div><button class="btn action-btn" id="refresh" aria-label="Refresh matchups"><span class="btn-text">Refresh</span><span class="btn-icon" aria-hidden="true">↻</span></button><button class="btn icon action-btn" id="open-settings" aria-label="Open settings"><span class="btn-text">Settings</span><span class="btn-icon" aria-hidden="true">⚙</span></button></div></header><section class="hero"><div><div class="eyebrow">${esc(state.nfl?.season || 'NFL')} season · Week ${esc(state.nfl?.week || '-')}</div><h1>Every league, one live desk.</h1><p class="hero-copy">${esc(state.user?.display_name || state.user?.username || '')} · ${visible.length} league${visible.length === 1 ? '' : 's'} included</p></div></section><div class="grid"><section class="stack"><div class="league-cards">${visible.length ? visible.map(renderLeagueCard).join('') : '<div class="matchup-card"><div class="empty">All leagues are excluded. Open settings to add one back.</div></div>'}</div></section><aside class="stack"><section><div class="eyebrow">Live ticker</div><h2 style="margin:4px 0 12px">Point swings</h2><div class="ticker">${renderTicker()}</div></section><section class="matchup-card"><div class="eyebrow">System status</div><h2 style="margin:5px 0 13px">Polling every ${settings.pollSeconds}s</h2><p class="matchup-meta">${settings.trackOpponent ? 'Tracking both lineups.' : 'Tracking your lineup.'}</p></section></aside></div></div>`; renderLeagueExclusions(); bindDashboard(); bindSettings(); bindLeagueExclusions(); }
 function bindDashboard() { $('refresh')?.addEventListener('click', () => pollAllLeagues(true)); $('open-settings')?.addEventListener('click', () => document.body.classList.add('settings-open')); $('close-settings')?.addEventListener('click', () => document.body.classList.remove('settings-open')); $('backdrop')?.addEventListener('click', () => document.body.classList.remove('settings-open')); bindVoiceSettings(); }
 async function pollAllLeagues(force = false) { checkForAppUpdate(); if (!force && !inGameWindow()) return; const original = state.selectedLeague; state.loading = true; try { const latestNfl = await api('/state/nfl'); const weekChanged = latestNfl.season !== state.nfl?.season || latestNfl.week !== state.nfl?.week; state.nfl = latestNfl; if (weekChanged) { state.leagueData = {}; localStorage.removeItem('fantasy-score-points'); } state.espnStats = await loadEspnStats(); state.projections = await api(`/projections/nfl/${state.nfl.season}/${state.nfl.week}`).catch(() => ({})); for (const league of includedLeagues()) { state.selectedLeague = league; await loadLeagueUsers(); await poll(true); state.leagueData[league.league_id] = { matchup: state.matchup, allMatchups: state.allMatchups, players: state.players, stats: state.stats, projections: state.projections, espnStats: state.espnStats, playerGames: state.playerGames, leagueUsers: state.leagueUsers }; } state.selectedLeague = original; state.lastUpdated = Date.now(); } catch (error) { state.error = error.message; } finally { state.loading = false; dashboardView(); schedulePoll(); } }
 async function connect(username) { state.loading = true; state.error = ''; setupView(); try { state.user = await api('/user/' + encodeURIComponent(username)); if (!state.user?.user_id) throw new Error('Sleeper username not found.'); localStorage.setItem('fantasy-score-user', username); state.nfl = await api('/state/nfl'); const leagues = await api(`/user/${state.user.user_id}/leagues/nfl/${state.nfl.season}`); state.leagues = (leagues || []).filter(league => league.status !== 'complete').slice(0, 10); if (!state.leagues.length) throw new Error('No active NFL leagues found for this season.'); state.selectedLeague = state.leagues[0]; await pollAllLeagues(true); } catch (error) { state.error = error.message + ' Check the spelling and try again.'; state.loading = false; setupView(); } }
